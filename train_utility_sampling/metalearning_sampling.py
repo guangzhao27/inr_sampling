@@ -1,5 +1,6 @@
 from functools import partial
 import torch
+import torch.nn as nn
 import torch.utils.checkpoint as cp
 from torch.nn.parallel import DistributedDataParallel as DDP
 from . import losses
@@ -18,6 +19,7 @@ def get_grad_norm(model):
     concat_grads = torch.cat(grads)
     total_norm = torch.norm(concat_grads)
     return total_norm
+    # cosine_similarity()
 
 def grad_norm_per_pixel(model, per_pix_losses, optimizer):
     pix_norms = []
@@ -66,45 +68,52 @@ def grad_norm_pixel_image(pix_norms, step, cfg):
     
 def gradient_similarity(pix_norms, pix_grads, step, cfg, loss, optimizer, inr):
     depth = cfg.inr.depth
-    gradient_correlation_graph = np.zeros(shape=(64, 64))
-    pix_inner_prods = []
-    sel_pix_grads_list = [pix_grads[2080], pix_grads[520], pix_grads[568], pix_grads[3592], pix_grads[3640]]
-    for pix_norm_grad in sel_pix_grads_list:
-        inner_prod = 0
-        for pix_grad in pix_grads:
-            inner_prod += torch.inner(pix_norm_grad, pix_grad)
-        pix_inner_prods.append(inner_prod)
+    sel = pix_grads[2048].view(-1)
+    similarities = []
+    cos = nn.CosineSimilarity(dim=0)
+    for grad in pix_grads:
+        similarities.append(abs(cos(sel, grad.view(-1)).item()))
+    similarity_matrix = np.array(similarities).reshape(64, 64)
+    print(similarity_matrix)
+    # gradient_correlation_graph = np.zeros(shape=(64, 64))
+    # pix_inner_prods = []
+    # sel_pix_grads_list = [pix_grads[2080], pix_grads[520], pix_grads[568], pix_grads[3592], pix_grads[3640]]
+    # for pix_norm_grad in sel_pix_grads_list:
+    #     inner_prod = 0
+    #     for pix_grad in pix_grads:
+    #         inner_prod += torch.inner(pix_norm_grad, pix_grad)
+    #     pix_inner_prods.append(inner_prod)
 
-    optimizer.zero_grad()
-    loss.backward(retain_graph=True)
-    grad_norm = get_grad_norm(inr)
+    # optimizer.zero_grad()
+    # loss.backward(retain_graph=True)
+    # grad_norm = get_grad_norm(inr)
 
-    gradient_correlation_graph[32][32] = pix_inner_prods[0] / grad_norm
-    gradient_correlation_graph[8][8] = pix_inner_prods[1] / grad_norm
-    gradient_correlation_graph[8][56] = pix_inner_prods[2] / grad_norm
-    gradient_correlation_graph[56][8] = pix_inner_prods[3] / grad_norm
-    gradient_correlation_graph[56][56] = pix_inner_prods[4] / grad_norm
+    # gradient_correlation_graph[32][32] = pix_inner_prods[0] / grad_norm
+    # gradient_correlation_graph[8][8] = pix_inner_prods[1] / grad_norm
+    # gradient_correlation_graph[8][56] = pix_inner_prods[2] / grad_norm
+    # gradient_correlation_graph[56][8] = pix_inner_prods[3] / grad_norm
+    # gradient_correlation_graph[56][56] = pix_inner_prods[4] / grad_norm
 
     plt.figure(figsize=(12,12))
     sns.heatmap(
-        gradient_correlation_graph,
+        similarity_matrix,
         cmap="YlOrBr",
         linewidths=0.5,
         norm=mcolors.LogNorm(),
         xticklabels=False,
         yticklabels=False)
     depth = cfg.inr.depth
-    title = f'5-Pixel Gradient Correlation Step {step} Depth {depth}'
+    title = f'Gradient Correlation Step {step} Depth {depth}'
     plt.title(title)
     parent_dir = "/sdcc/u/smccue/projects/inr_sampling/visuals/norms"
-    path = os.path.join(parent_dir, f"depth_{depth}/5_pix")
+    path = os.path.join(parent_dir, f"depth_{depth}/correlation")
     try:
         os.makedirs(path, exist_ok=True)
         print("Directory created")
     except OSError as error:
         print("Directory can not be created")
 
-    save_path = f"/sdcc/u/smccue/projects/inr_sampling/visuals/norms/depth_{depth}/5_pix/5_pixel_gradient_correlation_{depth}_step_{step}.png"
+    save_path = f"/sdcc/u/smccue/projects/inr_sampling/visuals/norms/depth_{depth}/correlation/gradient_correlation_depth_{depth}_step_{step}.png"
     plt.savefig(save_path)
     plt.close()
 

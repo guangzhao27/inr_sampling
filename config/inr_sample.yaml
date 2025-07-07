@@ -1,0 +1,73 @@
+defaults:
+  - _self_
+  - data: null
+  - optim: null
+  - inr: null
+  - wandb: null
+
+hydra:
+  job:
+    chdir: False
+
+#continue:
+saved_checkpoint : False
+checkpoint_path :
+
+data:
+  data_path: "/sdcc/u/smccue/projects/inr_sampling/scent_data/1k"
+  data_type: mmap
+  mmap_dir: '/sdcc/u/smccue/projects/inr_sampling/mmap_save'
+  dataset_name: "shallow-water-dino" 
+  data_to_encode:
+  missing_rate:
+  ntrain : 
+  ntest : 
+  sub_from :
+  space_factor : 1 # space resolution
+  time_factor : 1
+  seed: 15
+  val_missing_rate: 0.0
+  sub_array_num: 1
+  split_ratios:
+    - 0.7
+    - 0.15
+    - 0.15
+
+optim:
+  batch_size: 32
+  batch_size_val: 
+  lr_inr : 0.000005
+  lr_code : 0.01
+  meta_lr_code : 0.000005
+  weight_decay_code: 0
+  inner_steps : 3
+  epochs : 10000
+
+inr:
+  model_type : "siren"
+  latent_dim : 256
+  depth : 5
+  hidden_dim : 256
+  w0 : 30.0
+  use_latent: True
+  modulate_scale: False
+  modulate_shift: True
+  hypernet_depth: 1
+  hypernet_width: 128
+  last_activation: 
+  loss_type: "mse"
+
+wandb:
+  use_wandb: False
+  project: "functa2functa"
+  name: 
+  id: 
+  sweep_id:
+
+sampling:
+  type: random
+  rate: 0.2
+  cluster_type: slic
+
+
+# sample type: random; NMT; 

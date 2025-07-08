@@ -68,7 +68,7 @@ def grad_norm_pixel_image(pix_norms, step, cfg):
     
 def gradient_similarity(pix_norms, pix_grads, step, cfg, loss, optimizer, inr):
     depth = cfg.inr.depth
-    sel = pix_grads[2048].view(-1)
+    sel = pix_grads[2080].view(-1)
     similarities = []
     cos = nn.CosineSimilarity(dim=0)
     for grad in pix_grads:
@@ -97,9 +97,9 @@ def gradient_similarity(pix_norms, pix_grads, step, cfg, loss, optimizer, inr):
     plt.figure(figsize=(12,12))
     sns.heatmap(
         similarity_matrix,
-        cmap="YlOrBr",
-        linewidths=0.5,
-        norm=mcolors.LogNorm(),
+        cmap="hot",
+        linewidths=0.0,
+        # norm=mcolors.LogNorm(),
         xticklabels=False,
         yticklabels=False)
     depth = cfg.inr.depth

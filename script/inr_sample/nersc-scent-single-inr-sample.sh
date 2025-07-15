@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH -p csi
-#SBATCH -t 20:00:00
+#SBATCH -t 00:10:00
 #SBATCH --account csiml
 #SBATCH -N 1
 #SBATCH -n 1
@@ -8,11 +8,11 @@
 #SBATCH --gres=gpu:1
 
 w0=13
-sampling_rate=0.1
+sampling_rate=0.5
 train_ratio=1
 inner_steps=6
-# null NMT random random 2d_cluster_slic 2d_cluster_grid
-for sample_type in null
+# null NMT random 2d_cluster_slic 2d_cluster_grid EVOS
+for sample_type in EVOS
 do
     run_name="SCENT_single_${sample_type}_${sampling_rate}_w0_${w0}_4layer"
 
@@ -39,7 +39,13 @@ do
         inr.w0=$w0 \
         sampling.rate=$sampling_rate \
         sampling.type=$sample_type \
+        sampling.sample_num_schedular=constant \
+        sampling.mutation_method=constant \
+        sampling.profile_interval_method=lin_dec \
+        sampling.profile_guide=value \
         "data.split_ratios=[${train_ratio}, 0.01, 0.01]" \
         data.data_path=/sdcc/u/smccue/projects/inr_sampling/scent_data/1k \
         data.data_type=mmap
 done
+
+# Refer to inr_sample.yaml for choices for evos settings

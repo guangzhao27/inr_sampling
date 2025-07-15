@@ -55,7 +55,20 @@ inr:
   hypernet_depth: 1
   hypernet_width: 128
   last_activation: 
-  loss_type: "mse"
+  loss_type: "mse"  # All below are for EVOS only
+  use_lr_scheduler: "store_true"
+  multi_data: "store_true"
+  signal_type: "image"
+  eval_lpips: "store_true"
+  # Check if redundant
+  hidden_layers: 3
+  hidden_features: 256
+  first_omega: 30
+  hidden_omega: 30
+  first_bias_scale: None
+  scale_req_grad: "store_true"
+  N_freqs: 10
+  scale: 30
 
 wandb:
   use_wandb: False
@@ -65,9 +78,50 @@ wandb:
   sweep_id:
 
 sampling:
-  type: random
+  type: "random"
   rate: 0.2
-  cluster_type: slic
+  cluster_type: "slic"              # All below are for EVOS only
+  sample_num_schedular: "constant"  # "constant", "linear", "step", "cosine", "reverse-cosine"
+  lap_coff: 1e-5
+  crossover_method: "select"
+  use_laplace_epoch: 1500
+  mutation_method: "constant"       # "constant", "linear", "exp"
+  init_mutation_ratio: 0.5
+  end_mutation_ratio: 0.5
+  profile_interval_method: "lin_dec"    # "fixed", "lin_dec" 
+  init_interval: 100
+  end_interval: 50
+  profile_guide: "value"            # "value", "diff_1"
+  save_dir: "./log"
+  tag: "exp"
+  up_folder_name: "debug"
+  debug: "store_true"
+  device: "cuda:0"
+  log_epoch: 500
+  snap_epoch: 5000
+  measure_dense_diff: "store_true"
+  mdd_interval: 1
+  measure_crossover_diff: "store_true"
+  measure_sample_diff: "store_true"
+  record_indices: "store_true"
+  dense_measure_psnr: "store_true"
+# data_folder=""
 
+transform:
+  transform: "min_max"
+  trans_shift: -0.5
+  trans_scale: 2.0
+  pn_cum: 0.5
+  pn_buffer: -1
+  box_shift: 0.1
+  pn_alpha: 0.01
+  pn_k: 256.0
+  pn_beta: 0.05
+  gamma_boundary: 5.0
+  gamma: 1.0
+  inverse: "store_true"
+  rpp: "store_true"
+                                    
 
-# sample type: random; NMT; 
+# sample type: random; NMT;
+          

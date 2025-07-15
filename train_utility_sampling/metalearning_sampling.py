@@ -19,7 +19,6 @@ def get_grad_norm(model):
     concat_grads = torch.cat(grads)
     total_norm = torch.norm(concat_grads)
     return total_norm
-    # cosine_similarity()
 
 def grad_norm_per_pixel(model, per_pix_losses, optimizer):
     pix_norms = []
@@ -46,7 +45,6 @@ def grad_norm_pixel_image(pix_norms, step, cfg):
     plt.figure(figsize=(12,12))
     sns.heatmap(
         norms_matrix,
-        cmap="YlOrBr",
         linewidths=0.5,
         norm=mcolors.LogNorm(),
         xticklabels=False,
@@ -75,25 +73,6 @@ def gradient_similarity(pix_norms, pix_grads, step, cfg, loss, optimizer, inr):
         similarities.append(abs(cos(sel, grad.view(-1)).item()))
     similarity_matrix = np.array(similarities).reshape(64, 64)
     print(similarity_matrix)
-    # gradient_correlation_graph = np.zeros(shape=(64, 64))
-    # pix_inner_prods = []
-    # sel_pix_grads_list = [pix_grads[2080], pix_grads[520], pix_grads[568], pix_grads[3592], pix_grads[3640]]
-    # for pix_norm_grad in sel_pix_grads_list:
-    #     inner_prod = 0
-    #     for pix_grad in pix_grads:
-    #         inner_prod += torch.inner(pix_norm_grad, pix_grad)
-    #     pix_inner_prods.append(inner_prod)
-
-    # optimizer.zero_grad()
-    # loss.backward(retain_graph=True)
-    # grad_norm = get_grad_norm(inr)
-
-    # gradient_correlation_graph[32][32] = pix_inner_prods[0] / grad_norm
-    # gradient_correlation_graph[8][8] = pix_inner_prods[1] / grad_norm
-    # gradient_correlation_graph[8][56] = pix_inner_prods[2] / grad_norm
-    # gradient_correlation_graph[56][8] = pix_inner_prods[3] / grad_norm
-    # gradient_correlation_graph[56][56] = pix_inner_prods[4] / grad_norm
-
     plt.figure(figsize=(12,12))
     sns.heatmap(
         similarity_matrix,
@@ -376,17 +355,21 @@ def single_image_step(
 ):
     step = iter
     if sampler is not None:
-        graph = sampler.sample(
-            inner_step=0, 
-            graph=graph_ori, 
-            save_image=False
-        )
+        if cfg is not None and cfg.sampling.type == "EVOS":
+            graph = sampler.sample(graph_ori, step)
+        else:
+            graph = sampler.sample(
+                inner_step=0, 
+                graph=graph_ori, 
+                save_image=False
+            )
     else:
         graph = graph_ori
     features = graph.feat
     coords = graph.space_emb
-    
     features_recon = inr(coords)
+
+    # print("---graph---\n" + str(graph) + "\n ---features---\n" + str(features) + "\n ---coords---\n" + str(coords) + "\n ---recon---\n" + str(features_recon))
 
        
 
@@ -395,13 +378,17 @@ def single_image_step(
     # print(features_recon)
     # print("---PPL---")
     
-    loss = ((features_recon - graph.feat)**2).mean()
+    if cfg is not None and cfg.sampling.type == "EVOS":
+        # print("===p recon===\n" + str(features_recon) + "\n===p features ===\n" + str(features) + "\n===step===\n" + str(step))
+        loss = sampler._sampler_compute_loss(features_recon, features, step)
+    else:
+        loss = ((features_recon - graph.feat)**2).mean()
 
-    if iter % 100 == 0 and cfg is not None and optimizer is not None:
-        per_pix_losses = ((features_recon - graph.feat)**2)
-        pix_norms, pix_grads = grad_norm_per_pixel(inr, per_pix_losses, optimizer)
-        grad_norm_pixel_image(pix_norms, step, cfg)
-        gradient_similarity(pix_norms, pix_grads, step, cfg, loss, optimizer, inr)
+    # if iter % 100 == 0 and cfg is not None and optimizer is not None:
+    #     per_pix_losses = ((features_recon - graph.feat)**2)
+    #     pix_norms, pix_grads = grad_norm_per_pixel(inr, per_pix_losses, optimizer)
+    #     grad_norm_pixel_image(pix_norms, step, cfg)
+    #     gradient_similarity(pix_norms, pix_grads, step, cfg, loss, optimizer, inr)
         # print(per_pix_losses)
         # print("---PLL---")
         # pix_losses_list = per_pix_losses.mean(dim=1).cpu().detach().tolist()
@@ -411,14 +398,10 @@ def single_image_step(
         # print(matrix)
         # mse_points_image(matrix, step, cfg)
 
-    
-
     outputs = {
         "loss": loss,
         "reconstructions": features_recon if return_reconstructions else None,
         "rel_loss": losses.relative_rmse(features_recon, features) if use_rel_loss else None,
     }
-    
-    
     
     return outputs

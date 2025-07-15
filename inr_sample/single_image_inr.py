@@ -31,7 +31,7 @@ from train_utility_sampling.train_utility import (
     train_step_single_image,
     validation_step_single_image,
 )
-from train_utility_sampling.SamplerWrapper import INRSingle2dSamplerWrapper, add_cluster_label, graph_2d_cluster_single_image
+from train_utility_sampling.SamplerWrapper import INRSingle2dSamplerWrapper, add_cluster_label, graph_2d_cluster_single_image, EVOSSampler
 from utils.data.load_data import set_seed
 from utils.load_inr import create_inr_instance, load_inr_model
 from datetime import datetime
@@ -40,10 +40,6 @@ from torch_geometric.data import Data
 import pandas as pd 
 import seaborn as sns
 import matplotlib.pyplot as plt
-
-
-
-
 
 def initialize_wandb(cfg):
     if cfg.wandb.use_wandb:
@@ -92,8 +88,8 @@ def gradient_norm_image(norms, depth):
 
 def create_inr_sampler(cfg, inr, graph, current_date_str, run_name, device='cuda'):
     """
-    Build and return an INRSingle2dSamplerWrapper based on cfg.sampling settings,
-    or None if no sampling type is specified.
+    Build and return an INRSingle2dSamplerWrapper or EVOSSampler based on cfg.sampling 
+    settings, or None if no sampling type is specified.
     """
     sampling_type = cfg.sampling.type
     if sampling_type is None:
@@ -110,6 +106,13 @@ def create_inr_sampler(cfg, inr, graph, current_date_str, run_name, device='cuda
         cluster_type = cluster_map[sampling_type]
         # Run your graph clustering side-effect for a single image
         graph_2d_cluster_single_image(graph, 100, 0.01, cluster_type)
+    elif sampling_type == "EVOS":
+        img = graph.feat.reshape(64,64)
+        img = img.unsqueeze(0)
+        # print("===img for evos===\n" + str(img))
+        # print("===shape for evos===\n" + str(img.shape))
+        return EVOSSampler(cfg, img, graph)
+
     else:
         sampler_name = sampling_type
 
@@ -251,7 +254,10 @@ def main(cfg: DictConfig) -> None:
         lr=lr_inr,
         weight_decay=0,
     )
-    epoch_start = 0
+    if cfg.sampling.type == "EVOS":
+        epoch_start = 1
+    else:   # EVOS uses 1 based indexing for epochs
+        epoch_start = 0
     best_loss = np.inf
     
     
@@ -291,10 +297,15 @@ def main(cfg: DictConfig) -> None:
         space_emb=graph.space_emb[indices_t],
         T=torch.tensor(1),
     )
+    # print("---initial graph---\n" + str(graph) + "\n---coordinates---\n" + str(graph.cor))
+    # print("---features---\n" + str(graph.feat) + "\n---time---\n" + str(graph.time))
+    # print("---space_emb---\n" + str(graph.space_emb) + "\n---T---\n" + str(graph.T) + "\n---end---")
     
     
     ''' Begin the sampling setting '''
     inr_sampler = create_inr_sampler(cfg, inr, graph, current_date_str, run_name)
+    if cfg.sampling.type == "EVOS":
+        inr_sampler._evos_init()
     
     # Main Training Loop
     ''' Begin the training process '''
@@ -314,11 +325,11 @@ def main(cfg: DictConfig) -> None:
 
         if True in (step_show, step_show_last):
             
-            if inr_sampler is not None and step%100 == 0:
+            if inr_sampler != None and cfg.sampling.type != "EVOS" and step%100 == 0:
                 inr_sampler.sample(
                     inner_step=step, 
                     graph=graph, 
-                    save_image=True
+                    save_image=True,
                 )
             
             test_loss, rel_test_loss = validation_step_single_image(

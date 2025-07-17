@@ -649,22 +649,16 @@ class EVOSSampler:
         self.cur_use_ratio = self._get_cur_use_ratio(epoch)
 
         self._reset_rng()
-
-        _st = self.cfg.sampling.type
-
-        if _st == "EVOS":
-            if self._evos_is_fitness_eval_iter(epoch):
-                print("===Fitness Epoch===")
-                return coords, gt, None
-            else:
-                selection_mask = self._evos_get_selection_mask(epoch)
-                _coords = self.full_coords[selection_mask]
-                _gt = self.full_gt[selection_mask]
-                print("***Not Fitness Epoch, Selected Points***")
-                return _coords, _gt, selection_mask
-
+ 
+        if self._evos_is_fitness_eval_iter(epoch):
+            # print("===Fitness Epoch===\nEpoch: " + str(epoch))
+            return coords, gt, None
         else:
-            raise NotImplementedError
+            selection_mask = self._evos_get_selection_mask(epoch)
+            _coords = self.full_coords[selection_mask]
+            _gt = self.full_gt[selection_mask]
+            # print("***Not Fitness Epoch, Selected Points***\nEpoch" + str(epoch))
+            return _coords, _gt, selection_mask
 
         self._recover_rng()
         return _coords, _gt, selection_mask
@@ -727,6 +721,8 @@ class EVOSSampler:
         first_select_indices = sorted_map_index[-first_select_num:]
 
         # Augmented Unbiased Mutation
+        # These are additional points to supplement children found from parents,
+        # which were non-surviving points
         mutation_num = int(mutation_ratio * self.sample_num)
         remain_indices = sorted_map_index[:-first_select_num]
         sample_index = torch.randperm(remain_indices.shape[0], device=self.device)[
@@ -744,7 +740,7 @@ class EVOSSampler:
             self.sample_num, dtype=torch.bool, device=self.device
         )
         selection_mask[selected_indices] = True
-        print("===Augmented Unbiased Mutation Reached===")
+        # print("===Augmented Unbiased Mutation Reached===\nEpoch: " + str(epoch))
         return selection_mask
 
     def _evos_is_fitness_eval_iter(self, epoch):
@@ -758,12 +754,12 @@ class EVOSSampler:
             _start = self.cfg.sampling.init_interval
             _end = self.cfg.sampling.end_interval
             _cur_interval = _start + ((_end - _start) / self.cfg.optim.epochs) * epoch
-            print("===cur interval===\n" + str(_cur_interval))
+            # print("===cur interval===\n" + str(_cur_interval))
             return int(_cur_interval)
 
     def _evos_frequency_aware_crossover(self, pred, gt, epoch): 
         error_map = F.mse_loss(pred, gt, reduction="none").mean(1)
-        print("***FA Crossover Reached***")
+        # print("***FA Crossover Reached***\nEpoch: " + str(epoch))
         if self.cfg.sampling.crossover_method == "add":
             r_img = self.reconstruct_img(pred)
             laplace_map = F.mse_loss(
@@ -832,6 +828,7 @@ class EVOSSampler:
                     selected_index,
                 ]
             )
+            # Non surviving points, didn't generate children
             all_remain_index = sorted_map_index[
                 ~torch.isin(sorted_map_index, all_selected_index)
             ]

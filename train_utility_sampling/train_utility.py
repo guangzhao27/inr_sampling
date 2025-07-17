@@ -314,7 +314,7 @@ def train_step_single_image(step, graph, inr, device,
 
 def validation_step_single_image(step, graph, inr, device, 
                use_rel_loss, optimizer, 
-               sampler=None,
+               sampler=None, cfg=None
                ):
     
     inr.eval()
@@ -329,6 +329,7 @@ def validation_step_single_image(step, graph, inr, device,
         return_reconstructions=False,
         use_rel_loss=use_rel_loss,
         sampler=sampler, 
+        cfg = cfg
     )
     
     

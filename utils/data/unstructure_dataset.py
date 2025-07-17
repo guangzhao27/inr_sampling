@@ -1043,8 +1043,8 @@ def create_ns_dataset(datapath, latent_dim, space_factor=1, split_ratios=(0.7, 0
             raise NotImplementedError()
     elif data_type == 'hdf5':
         with h5py.File(datapath, 'r') as f:
-            total_samples = f['u'].shape[-1]
-            raw = f['u']
+            total_samples = f['particles'].shape[-1]    # original was u
+            raw = f['particles']    # original was u
     elif data_type == 'npy':
         raw = np.load(datapath)
         raw = raw.squeeze()

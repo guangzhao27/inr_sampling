@@ -56,17 +56,17 @@ inr:
   hypernet_width: 128
   last_activation: 
   loss_type: "mse"  # All below are for EVOS only
-  use_lr_scheduler: "store_true"
-  multi_data: "store_true"
+  use_lr_scheduler: False
+  multi_data: False
   signal_type: "image"
-  eval_lpips: "store_true"
+  eval_lpips: False
   # Check if redundant
   hidden_layers: 3
   hidden_features: 256
   first_omega: 30
   hidden_omega: 30
   first_bias_scale: None
-  scale_req_grad: "store_true"
+  scale_req_grad: False
   N_freqs: 10
   scale: 30
 
@@ -95,16 +95,16 @@ sampling:
   save_dir: "./log"
   tag: "exp"
   up_folder_name: "debug"
-  debug: "store_true"
+  debug: False
   device: "cuda:0"
   log_epoch: 500
   snap_epoch: 5000
-  measure_dense_diff: "store_true"
+  measure_dense_diff: False
   mdd_interval: 1
-  measure_crossover_diff: "store_true"
-  measure_sample_diff: "store_true"
-  record_indices: "store_true"
-  dense_measure_psnr: "store_true"
+  measure_crossover_diff: False
+  measure_sample_diff: False
+  record_indices: False
+  dense_measure_psnr: False
 # data_folder=""
 
 transform:
@@ -119,8 +119,8 @@ transform:
   pn_beta: 0.05
   gamma_boundary: 5.0
   gamma: 1.0
-  inverse: "store_true"
-  rpp: "store_true"
+  inverse: False
+  rpp: False
                                     
 
 # sample type: random; NMT;

@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import matplotlib.colors as mcolors
 from omegaconf import DictConfig, OmegaConf
+import torch.nn.functional as F
 import os
 
 def get_grad_norm(model):
@@ -66,6 +67,7 @@ def grad_norm_pixel_image(pix_norms, step, cfg):
     
 def gradient_similarity(pix_norms, pix_grads, step, cfg, loss, optimizer, inr):
     depth = cfg.inr.depth
+    print("pix grads shape: " + str(len(pix_grads)))
     sel = pix_grads[2080].view(-1)
     similarities = []
     cos = nn.CosineSimilarity(dim=0)
@@ -82,17 +84,17 @@ def gradient_similarity(pix_norms, pix_grads, step, cfg, loss, optimizer, inr):
         xticklabels=False,
         yticklabels=False)
     depth = cfg.inr.depth
-    title = f'Gradient Correlation Step {step} Depth {depth}'
+    title = f'Gradient Correlation Step {step} Depth {depth} {cfg.sampling.type}'
     plt.title(title)
     parent_dir = "/sdcc/u/smccue/projects/inr_sampling/visuals/norms"
-    path = os.path.join(parent_dir, f"depth_{depth}/correlation")
+    path = os.path.join(parent_dir, f"depth_{depth}/correlation/{cfg.sampling.type}")
     try:
         os.makedirs(path, exist_ok=True)
         print("Directory created")
     except OSError as error:
         print("Directory can not be created")
 
-    save_path = f"/sdcc/u/smccue/projects/inr_sampling/visuals/norms/depth_{depth}/correlation/gradient_correlation_depth_{depth}_step_{step}.png"
+    save_path = f"/sdcc/u/smccue/projects/inr_sampling/visuals/norms/depth_{depth}/correlation/{cfg.sampling.type}/gradient_correlation_depth_{depth}_step_{step}.png"
     plt.savefig(save_path)
     plt.close()
 
@@ -378,17 +380,21 @@ def single_image_step(
     # print(features_recon)
     # print("---PPL---")
     
-    if cfg is not None and cfg.sampling.type == "EVOS":
+    if is_train and cfg.sampling.type == "EVOS":
         # print("===p recon===\n" + str(features_recon) + "\n===p features ===\n" + str(features) + "\n===step===\n" + str(step))
         loss = sampler._sampler_compute_loss(features_recon, features, step)
     else:
-        loss = ((features_recon - graph.feat)**2).mean()
+        # loss = ((features_recon - graph.feat)**2).mean()
+        # if not is_train:
+            # print("---features recon---\n" + str(features_recon.shape))
+            # print("---gt features---\n" + str(graph.feat.shape))
+        loss = F.mse_loss(features_recon, graph.feat)
 
     # if iter % 100 == 0 and cfg is not None and optimizer is not None:
     #     per_pix_losses = ((features_recon - graph.feat)**2)
     #     pix_norms, pix_grads = grad_norm_per_pixel(inr, per_pix_losses, optimizer)
-    #     grad_norm_pixel_image(pix_norms, step, cfg)
-    #     gradient_similarity(pix_norms, pix_grads, step, cfg, loss, optimizer, inr)
+        # grad_norm_pixel_image(pix_norms, step, cfg)
+        # gradient_similarity(pix_norms, pix_grads, step, cfg, loss, optimizer, inr)
         # print(per_pix_losses)
         # print("---PLL---")
         # pix_losses_list = per_pix_losses.mean(dim=1).cpu().detach().tolist()

@@ -323,6 +323,26 @@ def main(cfg: DictConfig) -> None:
             cfg = cfg
             )
 
+        test_loss, rel_test_loss = validation_step_single_image(
+                step, graph, inr, 
+                device=device, 
+                use_rel_loss=use_rel_loss,
+                optimizer=optimizer,
+                sampler=inr_sampler,
+                cfg = cfg
+                )
+
+        if cfg.wandb.use_wandb:
+            wandb.log(
+                {
+                    "test_rel_loss": rel_test_loss,
+                    "train_rel_loss": rel_train_loss,
+                    "test_loss": test_loss,
+                    "train_loss": train_loss,
+                },
+                step=step
+            )
+
         if True in (step_show, step_show_last):
             
             if inr_sampler != None and cfg.sampling.type != "EVOS" and step%100 == 0:
@@ -332,24 +352,25 @@ def main(cfg: DictConfig) -> None:
                     save_image=True,
                 )
             
-            test_loss, rel_test_loss = validation_step_single_image(
-                step, graph, inr, 
-                device=device, 
-                use_rel_loss=use_rel_loss,
-                optimizer=optimizer,
-                sampler=None,
-                )
+            # test_loss, rel_test_loss = validation_step_single_image(
+            #     step, graph, inr, 
+            #     device=device, 
+            #     use_rel_loss=use_rel_loss,
+            #     optimizer=optimizer,
+            #     sampler=inr_sampler,
+            #     cfg = cfg
+            #     )
 
-            if cfg.wandb.use_wandb:
-                wandb.log(
-                    {
-                        "test_rel_loss": rel_test_loss,
-                        "train_rel_loss": rel_train_loss,
-                        "test_loss": test_loss,
-                        "train_loss": train_loss,
-                    },
-                    step=step
-                )
+            # if cfg.wandb.use_wandb:
+            #     wandb.log(
+            #         {
+            #             "test_rel_loss": rel_test_loss,
+            #             "train_rel_loss": rel_train_loss,
+            #             "test_loss": test_loss,
+            #             "train_loss": train_loss,
+            #         },
+            #         step=step
+            #     )
             else:
                 print(
                     f"Step {step}, Train Loss: {train_loss:.4f}, "

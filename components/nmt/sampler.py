@@ -18,7 +18,7 @@ def mt_sampler(data, y, preds, size, top_k=True):
     if top_k:
         _, idx = torch.topk(dif, n)
     else:
-        idx = torch.randperm(len(data))[:n]
+        idx = torch.randperm(len(data), device="cuda:0")[:n]
 
     # get sampled data
     sampled_data = data[idx]

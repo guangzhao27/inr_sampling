@@ -8,15 +8,18 @@
 #SBATCH --gres=gpu:1
 
 w0=13
-sampling_rate=0.5
+sampling_rate=0.01
 train_ratio=1
 inner_steps=6
-lr=5.6e-5
-depth=3
+lr=5.6e-5 # 5.6e-5 non full 
+depth=6
+n_start=100
+n_finish=10000
+
 # null NMT random 2d_cluster_slic 2d_cluster_grid EVOS
-for sample_type in EVOS
+for sample_type in 2d_cluster_grid
 do
-    run_name="SCENT_single_${sample_type}_${sampling_rate}_lr_${lr}_depth_${depth}"
+    run_name="SCENT_single_${sample_type}_${sampling_rate}_lr_${lr}_depth_${depth}_end_${n_finish}"
 
     cd /sdcc/u/smccue/projects/inr_sampling
     # source ~/anaconda3/etc/profile.d/conda.sh
@@ -45,11 +48,17 @@ do
         sampling.mutation_method=constant \
         sampling.profile_interval_method=lin_dec \
         sampling.profile_guide=value \
+        sampling.n_clusters_2d_end=$n_finish \
+        sampling.n_clusters_2d_start=$n_start \
         "data.split_ratios=[${train_ratio}, 0.01, 0.01]" \
         data.data_path=/sdcc/u/smccue/projects/inr_sampling/pde_bench/ns_incom_inhom_2d_512-0.h5 \
-        data.data_type=hdf5
+        data.data_type=hdf5 \
+        data.single_time_frame=113
 done
 
 # Refer to inr_sample.yaml for choices for evos settings
 # /sdcc/u/smccue/projects/inr_sampling/scent_data/1k
 # /sdcc/u/smccue/projects/inr_sampling/pde_bench/ns_incom_inhom_2d_512-0.h5
+# single_time_frame values:
+# 800 143 585 113
+# Chosen trajectory can be found in unstructure_dataset.py as variable "chosen_N"

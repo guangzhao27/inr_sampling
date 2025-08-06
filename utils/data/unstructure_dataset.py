@@ -624,6 +624,8 @@ class GraphNavierStokes(Dataset):
 
         self.height, self.width = datashape[1], datashape[2]
         self.dataset, self.mask = self.noisy_data_processing(tensor)
+        # print("mask->\n",str(self.mask))
+        # print("mask->\n",str(len(self.mask)))
         
     def noisy_data_processing(self, tensor):
         if self.missing_rate>0:
@@ -735,11 +737,17 @@ class GraphNavierStokesSampling(GraphNavierStokes):
         #     with h5py.File(datapath, 'r') as f:
         #         raw = f['u']
         
+        # TODO: Implement data selector using cfg
         data = raw[..., ::ssub, ::ssub, :]  # (T, H', W', N)
+
         # data = raw_subsampled[..., splits]
         tensor = torch.from_numpy(data.copy()).float()
         tensor = tensor.permute(3, 1, 2, 0) # (N, H, W, T)
-        
+        # print("tensor shape\n", tensor.shape)
+
+        # print("tensor new shape\n", tensor.shape)
+        is_all_zeros = not (tensor != 0).any().item()
+        # print("is all zeros: \n", str(is_all_zeros))
         self.height = tensor.size(1)
         self.width = tensor.size(2)
         self.T = tensor.size(3)
@@ -774,13 +782,17 @@ class GraphNavierStokesSampling(GraphNavierStokes):
         N, T, H, W = tensor.shape
 
         # Process each sample (avoid inner Python loops over time)
+        # print("N is", str(N))
         for idx in range(N):
+            # print("idx is", str(idx))
             sample_mask = mask[idx]      # shape: (H, W, T)
             sample_tensor = tensor[idx]  # shape: (H, W, T)
 
             # Get all nonzero indices at once: returns (num_points, 3) with columns [h, w, t]
+            # print("sample mask shape\n", sample_mask.shape)
             nonzero_idx = sample_mask.nonzero(as_tuple=False)
             if nonzero_idx.numel() == 0:
+                # print("no data present @", str(idx))
                 # If no data is present, create empty tensors.
                 cor = torch.empty((0, 2), dtype=torch.long)
                 feat = torch.empty((0, 1), dtype=torch.float32)
@@ -1019,8 +1031,8 @@ def create_soma_dataset(ntrain, mmap_dir, space_factor, time_factor, latent_dim,
     )
     
     return trainset, valset, testset, feat_transform, feat_inv_transform
-
-def create_ns_dataset(datapath, latent_dim, space_factor=1, split_ratios=(0.7, 0.15, 0.15), seed=42, data_type='mmap'):
+# Original split ratios: 0.7, 0.15, 0.15
+def create_ns_dataset(datapath, latent_dim, space_factor=1, split_ratios=(0.5, 0.25, 0.25), seed=42, data_type='mmap'):
     """
     Randomly split indices into train/val/test based on given ratios.
     Optionally saves to JSON so splits can be reused.
@@ -1043,8 +1055,23 @@ def create_ns_dataset(datapath, latent_dim, space_factor=1, split_ratios=(0.7, 0
             raise NotImplementedError()
     elif data_type == 'hdf5':
         with h5py.File(datapath, 'r') as f:
-            total_samples = f['particles'].shape[-1]    # original was u
-            raw = f['particles']    # original was u
+            f = h5py.File(datapath, 'r')
+            raw = f['particles']
+            total_samples = raw.shape[0]
+            raw = np.squeeze(raw, axis=-1)
+            raw = np.transpose(raw, (1, 2, 3, 0))
+            
+        #     total_samples = f['particles'].shape[-1]    # original was u
+        #     raw = f['particles']    # original was u
+            # print("Particles shape: " + str(f['particles'].shape[-1]))
+            # print("Particles raw: " + str(f['particles']))
+        # f = h5py.File(datapath, 'r')
+        
+        # print("Compression codec:", str(raw.compression))
+        # print("Filter pipeline:", str(raw.compression_opts))
+        # print("First two time-slices shape:", str(raw[..., :2].shape))
+        # print("Particles shape: " + str(f['particles'].shape[-1]))
+        # print("Particles raw: " + str(f['particles']))
     elif data_type == 'npy':
         raw = np.load(datapath)
         raw = raw.squeeze()
@@ -1075,13 +1102,18 @@ def create_ns_dataset(datapath, latent_dim, space_factor=1, split_ratios=(0.7, 0
         'test': slice(val_end, test_end)
     }
     
+    # Can use sel_array instead of train_array to specify
+    # desired image for single image inr
+    chosen_N = 3    # Currently 0-3
+    sel_array = raw[..., slice(chosen_N,chosen_N + 1)]
     train_array = raw[..., splits['train']]
     val_array = raw[..., splits['val']]
     test_array = raw[..., splits['test']]
     
+    
     # raw shape (T, H, W, N)
     trainset = GraphNavierStokesSampling(
-        raw = train_array,
+        raw = sel_array,
         ssub=space_factor, 
         )
     
@@ -1098,6 +1130,10 @@ def create_ns_dataset(datapath, latent_dim, space_factor=1, split_ratios=(0.7, 0
     trainset.initial_latent_vector(latent_dim)
     valset.initial_latent_vector(latent_dim)
     testset.initial_latent_vector(latent_dim)
+    # print("Trainset Total:\n", str(trainset))
+    # print("Trainset First:\n", str(trainset[0]))
+    # print("Trainset Array:\n", str(train_array))
+    # print("Trainset Array First:\n", str(train_array[999,:,:,0].shape))
 
     return trainset, valset, testset
 
@@ -1113,4 +1149,6 @@ def create_ns_dataset(datapath, latent_dim, space_factor=1, split_ratios=(0.7, 0
 
 def get_graph_t_idx(graph, t) -> torch.Tensor:
     indices_t = (graph.time == t).nonzero(as_tuple=True)[0]
+    # print("graph time in get_graph_t_idx\n", str(t))
+    # print("indices\n", str(indices_t.shape))
     return indices_t

@@ -189,7 +189,6 @@ def save_sampling_result_single_image(
     
     graph.to(device)
     inr.to(device)
-    
     sampler.sample(
         inner_step=step,
         graph=graph,

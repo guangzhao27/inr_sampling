@@ -63,6 +63,9 @@ class InrSamplerWrapper:
     """
     def __init__(
                 self,
+                n_clusters_2d_start: 100,
+                n_clusters_2d_end: 100,
+                epochs: 5000,
                 model: torch.nn.Module,
                 iters: int,
                 device: str="cuda:0",
@@ -76,8 +79,11 @@ class InrSamplerWrapper:
                 #  save_samples_path: Path=Path("logs/sampling"),
                 #  save_losses_path: Path=Path("logs/losses"),
                 #  save_name: str=None,
-                save_interval: int=100
+                save_interval: int=100,
                 ):
+        self.n_clusters_2d_start = n_clusters_2d_start
+        self.n_clusters_2d_end = n_clusters_2d_end
+        self.epochs = epochs
         self.model = model
         self.device = torch.device(device)
         self.model.to(self.device)
@@ -115,7 +121,7 @@ class InrSamplerWrapper:
                 # Ensure at least one node is sampled per time frame.
                 n_samples = max(int(n_t * self.sample_rate), 1)
                 # Randomly permute indices and select n_samples of them.
-                perm = torch.randperm(n_t)[:n_samples]
+                perm = torch.randperm(n_t, device=self.device)[:n_samples]
                 sampled_indices.append(indices_t[perm])
             
             # Concatenate indices from all time frames.
@@ -194,6 +200,7 @@ class InrSamplerWrapper:
             T=graph.T,  # global property (total time frames) remains unchanged
             latent_vector=graph.latent_vector  # global latent vector remains unchanged
         )
+        # sampled_graph = sampled_graph.to(device)
         
         if save_image:
             self.save_image_path = os.path.join(self.save_samples_path,  f"{self.sample_type}_o{outer_step}_i{inner_step}")
@@ -264,15 +271,19 @@ class InrSamplerWrapper:
         # Create directory if it doesn't exist
         os.makedirs(self.save_image_path, exist_ok=True)
         
+        # print("graph.t init shape: ", str(graph.T.shape))
         # Total number of time frames
         if isinstance(graph.T, torch.Tensor) and graph.T.dim() >=1:
             T_show = graph.T[0]
         else:
             T_show = graph.T
+        # print("***cor shape***\n" + str(graph.cor.shape))
         W = graph.cor[:, 0].max()+1
         H = graph.cor[:, 1].max()+1
         
         # Loop over each time frame
+        # for t in range(T_show):
+        # print("T_Show:", str(T_show))
         for t in range(T_show):
             # Mask for all nodes at time t
             frame_mask = (graph.time == t)
@@ -291,7 +302,7 @@ class InrSamplerWrapper:
             plt.axis('off')            
             # Overlay sampled points
             plt.scatter(sampled_coords[:, 1], sampled_coords[:, 0],
-                        c='red', s=10,
+                        c='red', s=0.015625,
             )
             plt.title(f'Time Frame {t}')
             
@@ -358,6 +369,7 @@ def sample_random_node_indices_per_cluster(
         cluster_dict,
         graph_idx, 
     ) -> list[torch.Tensor]:
+        device = torch.device("cuda")
         samples = []
         offset = graph_idx * nodes_per_graph
         for cluster_num, idx_tensor in cluster_dict.items():
@@ -370,7 +382,12 @@ def sample_random_node_indices_per_cluster(
             # k = min(n, num_per_cluster)
             k = num_per_cluster
             perm = torch.randperm(n)[:k]
-            chosen = idx_tensor[perm]
+            chosen = idx_tensor[perm].to(device)
+            # print("Chosen: " + str(chosen.device))
+            # print("idx_tensor: " + str(idx_tensor.device))
+            # print("perm: " + str(perm.device))
+            # print("offset: " + str(offset.device))
+            # chosen.to(device)
             samples.append(chosen+offset)
         return samples
         
@@ -491,7 +508,7 @@ class INRSingle2dSamplerWrapper(InrSamplerWrapper):
         n_t = graph.cor.shape[0]  # total number of corrdinates in the graph
         n_samples = max(int(n_t * self.sample_rate), 1)
         if self.sample_type == "random":
-            sampled_idx = torch.randperm(n_t)[:n_samples]
+            sampled_idx = torch.randperm(n_t, device=self.device)[:n_samples]
         elif self.sample_type == "NMT":
             with torch.no_grad():
                 graph = graph.to(self.device)
@@ -505,6 +522,13 @@ class INRSingle2dSamplerWrapper(InrSamplerWrapper):
             # This is a workaround to use the same sampling function.
             # In practice, you might want to implement a separate 2D sampling function.
             # Here we assume the graph has been clustered already. 
+
+            if inner_step % 100 == 0:
+                _start = self.n_clusters_2d_start
+                _end = self.n_clusters_2d_end
+                n_clusters = _start + ((_end - _start) / self.epochs) * inner_step
+                graph_2d_cluster_single_image(graph, n_clusters, 0.01, 'grid')
+
             num_per_cluster = max(1, math.ceil(n_samples / len(graph.cluster_set[0])))
             rough_idx = sample_random_node_indices_per_cluster(
                 graph, cluster_dim='2d', num_per_cluster=num_per_cluster
@@ -539,11 +563,13 @@ class INRSingle2dSamplerWrapper(InrSamplerWrapper):
             self._save_sample_images(graph, sampled_graph, dif=dif)
         return sampled_graph
 
-# SLIC sampler
+# 2d cluster sampler
 def graph_2d_cluster_single_image(graph, n_segments, compactness=1, cluster_type='slic'):
     T = graph.T.sum()
     
     W, H = graph.cor.max(axis=0)[0] +1
+    W = W.item()
+    H = H.item()
     
     graph.T = torch.tensor(1)
     T = graph.T.sum()
@@ -643,7 +669,8 @@ class EVOSSampler:
         # TODO: Pass in number of epochs
 
     def _sampler_get_coords_gt(self, epoch, graph):
-        coords, gt = self.graph.space_emb, self.graph.feat
+        # coords, gt = self.graph.space_emb, self.graph.feat
+        coords, gt = self.full_coords, self.full_gt
         # print("---coords---\n" + str(coords) + "\n---full_gt---\n" + str(gt))
         # TODO: Pass in coords and gt
         self.cur_use_ratio = self._get_cur_use_ratio(epoch)

@@ -9,6 +9,10 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
+from util.logger import log
+from itertools import islice
+from time import time
+
 
 os.environ["WANDB_MODE"] = "offline"
 os.environ["WANDB_DIR"] = '/sdcc/u/smccue/projects/inr_sampling/wandb'
@@ -67,6 +71,7 @@ def initialize_wandb(cfg):
 
         print("id", run.id)
         print("dir", run.dir)
+        return run
 
 def gradient_norm_image(norms, depth):
     df = pd.DataFrame({
@@ -105,9 +110,10 @@ def create_inr_sampler(cfg, inr, graph, current_date_str, run_name, device='cuda
         sampler_name = '2d_cluster'
         cluster_type = cluster_map[sampling_type]
         # Run your graph clustering side-effect for a single image
-        graph_2d_cluster_single_image(graph, 100, 0.01, cluster_type)
+        _start = cfg.sampling.n_clusters_2d_start
+        graph_2d_cluster_single_image(graph, _start, 0.01, cluster_type)
     elif sampling_type == "EVOS":
-        img = graph.feat.reshape(64,64)
+        img = graph.feat.reshape(512,512)
         img = img.unsqueeze(0)
         # print("===img for evos===\n" + str(img))
         # print("===shape for evos===\n" + str(img.shape))
@@ -124,13 +130,17 @@ def create_inr_sampler(cfg, inr, graph, current_date_str, run_name, device='cuda
         sample_rate=cfg.sampling.rate,
         sample_type=sampler_name,
         save_samples_path=save_path,
+        n_clusters_2d_start=cfg.sampling.n_clusters_2d_start,
+        n_clusters_2d_end=cfg.sampling.n_clusters_2d_end,
+        epochs = cfg.optim.epochs
     )
 
 @hydra.main(config_path="../config/", config_name="inr_sample.yaml")
 def main(cfg: DictConfig) -> None:
-
-    
     #Initialization
+    trl_vals_arr = []
+    time_vals_arr = []
+    step_vals_arr = []
 
     # neceassary for some reason now
     torch.set_default_dtype(torch.float32)
@@ -184,7 +194,7 @@ def main(cfg: DictConfig) -> None:
     latent_dim = cfg.inr.latent_dim
 
     # wandb
-    initialize_wandb(cfg)
+    run = initialize_wandb(cfg)
 
     device = torch.device("cuda")
     set_seed(seed)
@@ -231,10 +241,35 @@ def main(cfg: DictConfig) -> None:
     val_loader = DataLoader(dataset=valset, batch_size=batch_size, shuffle=False, collate_fn=collate_graph_inr)
     test_loader = DataLoader(dataset=testset, batch_size=batch_size, shuffle=False, collate_fn=collate_graph_inr)
 
-    print("train", len(trainset))
-    print("val", len(valset))
+    # print("train", len(trainset))
+    # print("val", len(valset))
 
+    # print("len train_loader:\n", str(len(train_loader)))
+    graph = next(iter(train_loader))
+    gidx = 0
+    t = cfg.data.single_time_frame  # Use this to time frame
+    indices_t = get_graph_t_idx(graph, t)
 
+    graph = Data(
+        cor=graph.cor[indices_t],
+        feat=graph.feat[indices_t],
+        time=torch.zeros(len(indices_t)),  # set time to 0 tensor
+        space_emb=graph.space_emb[indices_t],
+        T=torch.tensor(1),
+    )
+    graph = graph.to(device)
+    graph_ori = graph.clone()
+    # print("indices ->\n" + str(len(indices_t)))
+
+    # print("---time shape---\n", str(graph.time.shape))
+    # print("---T---\n", str(graph.T))
+    # print("---initial graph---\n" + str(graph) + "\n---coordinates---\n" + str(graph.cor))
+    # print("---features---\n" + str(graph.feat) + "\n---time---\n" + str(graph.time))
+    # print("---space_emb---\n" + str(graph.space_emb) + "\n---T---\n" + str(graph.T) + "\n---end---")
+
+    log.start_timer("final")
+    t0 = time()
+    
     """ Initialize model, optimizer """
     inr = create_inr_instance(
         cfg, input_dim=input_dim, output_dim=output_dim, device=device
@@ -260,6 +295,7 @@ def main(cfg: DictConfig) -> None:
         epoch_start = 0
     best_loss = np.inf
     
+
     
     """ Update model and optimizer with checkpoint"""
     if saved_checkpoint:
@@ -273,35 +309,21 @@ def main(cfg: DictConfig) -> None:
 
     # if cfg.wandb.use_wandb:
     #     wandb.log({"results_dir": str(RESULTS_DIR)}, step=epoch_start, commit=False)
-
-
-
-    
     
     # if cfg.sampling.type in ['3d_cluster']:
     #     cluster_dim = '2d'
     #     add_cluster_label(train_loader, 1000, 0.01, cluster_dim=cluster_dim)
     #     add_cluster_label(val_loader, 1000, 0.01, cluster_dim=cluster_dim)
-        
     
-    
-    graph = next(iter(train_loader))
-    gidx = 0
-    t = 10
-    indices_t = get_graph_t_idx(graph, t)
-    
-    graph = Data(
-        cor=graph.cor[indices_t],
-        feat=graph.feat[indices_t],
-        time=torch.zeros(len(indices_t)),  # set time to 0 tensor
-        space_emb=graph.space_emb[indices_t],
-        T=torch.tensor(1),
-    )
-    # print("---initial graph---\n" + str(graph) + "\n---coordinates---\n" + str(graph.cor))
-    # print("---features---\n" + str(graph.feat) + "\n---time---\n" + str(graph.time))
-    # print("---space_emb---\n" + str(graph.space_emb) + "\n---T---\n" + str(graph.T) + "\n---end---")
-    
-    
+    # graph = Data(
+    #     cor=graph.cor[indices_t],
+    #     feat=graph.feat[indices_t],
+    #     time=torch.full((len(indices_t),), 995, dtype=torch.long),  # actual time
+    #     space_emb=graph.space_emb[indices_t],
+    #     T=torch.tensor(1000),
+    # )
+
+
     ''' Begin the sampling setting '''
     inr_sampler = create_inr_sampler(cfg, inr, graph, current_date_str, run_name)
     if cfg.sampling.type == "EVOS":
@@ -309,11 +331,15 @@ def main(cfg: DictConfig) -> None:
     
     # Main Training Loop
     ''' Begin the training process '''
+    # log.start_timer("step")
     for step in range(epoch_start, epochs):
         
         use_rel_loss = True
         step_show = step % 10 == 0
         step_show_last = step == epochs - 1
+
+        # Start Timer
+
         train_loss, rel_train_loss, grad_norm = train_step_single_image(
             step, graph, inr, 
             device=device,
@@ -322,6 +348,8 @@ def main(cfg: DictConfig) -> None:
             sampler=inr_sampler,
             cfg = cfg
             )
+
+        torch.cuda.synchronize()
 
         test_loss, rel_test_loss = validation_step_single_image(
                 step, graph, inr, 
@@ -339,38 +367,58 @@ def main(cfg: DictConfig) -> None:
                     "train_rel_loss": rel_train_loss,
                     "test_loss": test_loss,
                     "train_loss": train_loss,
+                    "Time": time() - t0
                 },
                 step=step
             )
+            trl_vals_arr.append(rel_test_loss)
+            time_vals_arr.append(time() - t0)
+            step_vals_arr.append(step)
 
         if True in (step_show, step_show_last):
-            
-            if inr_sampler != None and cfg.sampling.type != "EVOS" and step%100 == 0:
-                inr_sampler.sample(
-                    inner_step=step, 
-                    graph=graph, 
-                    save_image=True,
+            if cfg.sampling.type != None:
+                if cfg.sampling.type != "EVOS" and step % 2500 == 0:
+                    # if cfg.sampling.type == "2d_cluster_grid":  # Comment this block out to remove scheduler
+                    #     print("New cluster graph made")
+                    #     _start = cfg.sampling.n_clusters_2d_start
+                    #     _end = cfg.sampling.n_clusters_2d_end
+                    #     n_clusters = _start + ((_end - _start) / epochs) * step
+                    #     graph_2d_cluster_single_image(graph_ori, n_clusters, 0.01, 'grid')
+                    inr_sampler.sample(
+                        inner_step=step, 
+                        graph=graph, 
+                        save_image=True,
+                    )
+                elif cfg.sampling.type == "EVOS" and step % 100 == 0:
+                    inr_sampler.sample(
+                        inner_step=step, 
+                        graph=graph, 
+                        save_image=True,
+                        epoch=step
+                    )
+            test_loss, rel_test_loss = validation_step_single_image(
+                step, graph, inr, 
+                device=device, 
+                use_rel_loss=use_rel_loss,
+                optimizer=optimizer,
+                sampler=inr_sampler,
+                cfg = cfg
                 )
-            
-            # test_loss, rel_test_loss = validation_step_single_image(
-            #     step, graph, inr, 
-            #     device=device, 
-            #     use_rel_loss=use_rel_loss,
-            #     optimizer=optimizer,
-            #     sampler=inr_sampler,
-            #     cfg = cfg
-            #     )
 
-            # if cfg.wandb.use_wandb:
-            #     wandb.log(
-            #         {
-            #             "test_rel_loss": rel_test_loss,
-            #             "train_rel_loss": rel_train_loss,
-            #             "test_loss": test_loss,
-            #             "train_loss": train_loss,
-            #         },
-            #         step=step
-            #     )
+            if cfg.wandb.use_wandb:
+                wandb.log(
+                    {
+                        "test_rel_loss": rel_test_loss,
+                        "train_rel_loss": rel_train_loss,
+                        "test_loss": test_loss,
+                        "train_loss": train_loss,
+                        "Time": time() - t0
+                    },
+                    step=step
+                )
+                trl_vals_arr[-1] = rel_test_loss
+                time_vals_arr[-1] = time() - t0
+                step_vals_arr[-1] = step
             else:
                 print(
                     f"Step {step}, Train Loss: {train_loss:.4f}, "
@@ -399,9 +447,26 @@ def main(cfg: DictConfig) -> None:
                     },
                     savepath,
                 )
-        
+    
+    log.end_timer("final")
+    t1 = time()
+    total = t1-t0
+    print("TIME:", str(total))
+
+    # Output stats to file
+    # with open('/sdcc/u/smccue/projects/inr_sampling/visuals/out.txt', 'a') as f:
+    #     trl_vals = (','.join(str(v) for v in trl_vals_arr))
+    #     time_vals = (','.join(str(v) for v in time_vals_arr))
+    #     step_vals = (','.join(str(v) for v in step_vals_arr))
+    #     print(str(cfg.sampling.type) + 
+    #             "\ntrl\n" + str(trl_vals) +
+    #             "\ntime\n" + str(time_vals) +
+    #             "\nstep\n" + str(step_vals),
+    #             file=f)  # Python 3.x
+
     return rel_test_loss
 
 if __name__ == "__main__":
     main()
+    time = log.end_all_timer()
     print('finish')

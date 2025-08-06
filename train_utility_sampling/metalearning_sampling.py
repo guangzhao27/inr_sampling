@@ -131,7 +131,9 @@ def graph_inner_loop(
     fitted_modulations = torch.zeros_like(graph_ori.latent_vector).requires_grad_()
     
     for inner_step in range(inner_steps):
+        # print("In the inner step")
         if sampler is not None:
+            # print("Reached the sample step")
             graph = sampler.sample(
                 outer_step=outer_step, 
                 inner_step=inner_step, 
@@ -382,27 +384,28 @@ def single_image_step(
     
     if is_train and cfg.sampling.type == "EVOS":
         # print("===p recon===\n" + str(features_recon) + "\n===p features ===\n" + str(features) + "\n===step===\n" + str(step))
-        loss = sampler._sampler_compute_loss(features_recon, features, step)
-    else:
+        # loss = sampler._sampler_compute_loss(features_recon, features, step)
+        sampler._sampler_compute_loss(features_recon, features, step)
+    # else:
         # loss = ((features_recon - graph.feat)**2).mean()
         # if not is_train:
             # print("---features recon---\n" + str(features_recon.shape))
             # print("---gt features---\n" + str(graph.feat.shape))
-        loss = F.mse_loss(features_recon, graph.feat)
+    loss = F.mse_loss(features_recon, graph.feat)
 
     # if iter % 100 == 0 and cfg is not None and optimizer is not None:
     #     per_pix_losses = ((features_recon - graph.feat)**2)
-    #     pix_norms, pix_grads = grad_norm_per_pixel(inr, per_pix_losses, optimizer)
-        # grad_norm_pixel_image(pix_norms, step, cfg)
-        # gradient_similarity(pix_norms, pix_grads, step, cfg, loss, optimizer, inr)
-        # print(per_pix_losses)
-        # print("---PLL---")
-        # pix_losses_list = per_pix_losses.mean(dim=1).cpu().detach().tolist()
-        # print(pix_losses_list)
-        # print("---MATRIX---")
-        # matrix = np.array(pix_losses_list).reshape(64, 64)
-        # print(matrix)
-        # mse_points_image(matrix, step, cfg)
+    # #     pix_norms, pix_grads = grad_norm_per_pixel(inr, per_pix_losses, optimizer)
+    #     # grad_norm_pixel_image(pix_norms, step, cfg)
+    #     # gradient_similarity(pix_norms, pix_grads, step, cfg, loss, optimizer, inr)
+    #     # print(per_pix_losses)
+    #     # print("---PLL---")
+    #     pix_losses_list = per_pix_losses.mean(dim=1).cpu().detach().tolist()
+    #     # print(pix_losses_list)
+    #     # print("---MATRIX---")
+    #     matrix = np.array(pix_losses_list).reshape(512, 512)
+    #     # print(matrix)
+    #     mse_points_image(matrix, step, cfg)
 
     outputs = {
         "loss": loss,

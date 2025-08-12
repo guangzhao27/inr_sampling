@@ -533,6 +533,8 @@ class INRSingle2dSamplerWrapper(InrSamplerWrapper):
             rough_idx = sample_random_node_indices_per_cluster(
                 graph, cluster_dim='2d', num_per_cluster=num_per_cluster
                 )
+            # print("rough_idx: " + str(rough_idx.shape))
+            # print("num_per_cluster: " + str(num_per_cluster))
             space_emb = graph.space_emb[rough_idx].to(self.device)  # [N_rough, D]
             feats = graph.feat[rough_idx].to(self.device)  # [N_rough, F]
             with torch.no_grad():
@@ -923,13 +925,13 @@ class EVOSSampler:
     def sample(
         self, 
         graph, 
-        epoch, 
         inner_step=1, 
         modulations: torch.Tensor=None, 
         save_image=False):
         # Get coords function
         # Return the output in Data() structure to fit inr_sampling pipeline
-        coords, gt, sel_mask = self._sampler_get_coords_gt(epoch, graph)
+        # print(inner_step)
+        coords, gt, sel_mask = self._sampler_get_coords_gt(inner_step, graph)
 
         if sel_mask != None:
             graph = Data(

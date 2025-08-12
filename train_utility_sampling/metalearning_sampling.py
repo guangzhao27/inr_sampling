@@ -363,7 +363,7 @@ def single_image_step(
             graph = sampler.sample(graph_ori, step)
         else:
             graph = sampler.sample(
-                inner_step=0, 
+                inner_step=step, 
                 graph=graph_ori, 
                 save_image=False
             )
@@ -375,7 +375,7 @@ def single_image_step(
 
     # print("---graph---\n" + str(graph) + "\n ---features---\n" + str(features) + "\n ---coords---\n" + str(coords) + "\n ---recon---\n" + str(features_recon))
 
-       
+    # print(features_recon)
 
 
     # print("---FR---")
@@ -386,12 +386,18 @@ def single_image_step(
         # print("===p recon===\n" + str(features_recon) + "\n===p features ===\n" + str(features) + "\n===step===\n" + str(step))
         # loss = sampler._sampler_compute_loss(features_recon, features, step)
         sampler._sampler_compute_loss(features_recon, features, step)
+        # I'm unsure if this is operation should still be performed given we use
+        # MSE loss
+    # else:
+        # loss = F.mse_loss(features_recon, graph.feat)
+    loss = F.mse_loss(features_recon, graph.feat)
+    # print(features_recon.shape, graph.feat.shape)
+
     # else:
         # loss = ((features_recon - graph.feat)**2).mean()
         # if not is_train:
             # print("---features recon---\n" + str(features_recon.shape))
             # print("---gt features---\n" + str(graph.feat.shape))
-    loss = F.mse_loss(features_recon, graph.feat)
 
     # if iter % 100 == 0 and cfg is not None and optimizer is not None:
     #     per_pix_losses = ((features_recon - graph.feat)**2)

@@ -246,8 +246,8 @@ def main(cfg: DictConfig) -> None:
 
     # print("len train_loader:\n", str(len(train_loader)))
     graph = next(iter(train_loader))
-    gidx = 0
-    t = cfg.data.single_time_frame  # Use this to time frame
+    t = cfg.data.single_time_frame  # Use this to time frame (For h5py)
+    # t = 10  # Use this to time frame
     indices_t = get_graph_t_idx(graph, t)
 
     graph = Data(
@@ -257,6 +257,7 @@ def main(cfg: DictConfig) -> None:
         space_emb=graph.space_emb[indices_t],
         T=torch.tensor(1),
     )
+    # print(graph.feat)
     graph = graph.to(device)
     graph_ori = graph.clone()
     # print("indices ->\n" + str(len(indices_t)))
@@ -268,6 +269,7 @@ def main(cfg: DictConfig) -> None:
     # print("---space_emb---\n" + str(graph.space_emb) + "\n---T---\n" + str(graph.T) + "\n---end---")
 
     log.start_timer("final")
+    total_train_time = 0
     t0 = time()
     
     """ Initialize model, optimizer """
@@ -329,17 +331,22 @@ def main(cfg: DictConfig) -> None:
     if cfg.sampling.type == "EVOS":
         inr_sampler._evos_init()
     
+    t_init = time() - t0
+    total_train_time += t_init
     # Main Training Loop
     ''' Begin the training process '''
     # log.start_timer("step")
     for step in range(epoch_start, epochs):
         
+        print(step)
         use_rel_loss = True
-        step_show = step % 10 == 0
+        # step_show = step % 10 == 0
+        step_show = True
         step_show_last = step == epochs - 1
 
         # Start Timer
 
+        t1 = time()
         train_loss, rel_train_loss, grad_norm = train_step_single_image(
             step, graph, inr, 
             device=device,
@@ -348,63 +355,35 @@ def main(cfg: DictConfig) -> None:
             sampler=inr_sampler,
             cfg = cfg
             )
+        t_step = time() - t1
+        total_train_time += t_step
 
-        torch.cuda.synchronize()
-
-        test_loss, rel_test_loss = validation_step_single_image(
-                step, graph, inr, 
-                device=device, 
-                use_rel_loss=use_rel_loss,
-                optimizer=optimizer,
-                sampler=inr_sampler,
-                cfg = cfg
-                )
-
-        if cfg.wandb.use_wandb:
-            wandb.log(
-                {
-                    "test_rel_loss": rel_test_loss,
-                    "train_rel_loss": rel_train_loss,
-                    "test_loss": test_loss,
-                    "train_loss": train_loss,
-                    "Time": time() - t0
-                },
-                step=step
-            )
-            trl_vals_arr.append(rel_test_loss)
-            time_vals_arr.append(time() - t0)
-            step_vals_arr.append(step)
+        torch.cuda.synchronize()    
 
         if True in (step_show, step_show_last):
-            if cfg.sampling.type != None:
-                if cfg.sampling.type != "EVOS" and step % 2500 == 0:
-                    # if cfg.sampling.type == "2d_cluster_grid":  # Comment this block out to remove scheduler
-                    #     print("New cluster graph made")
-                    #     _start = cfg.sampling.n_clusters_2d_start
-                    #     _end = cfg.sampling.n_clusters_2d_end
-                    #     n_clusters = _start + ((_end - _start) / epochs) * step
-                    #     graph_2d_cluster_single_image(graph_ori, n_clusters, 0.01, 'grid')
-                    inr_sampler.sample(
-                        inner_step=step, 
-                        graph=graph, 
-                        save_image=True,
-                    )
-                elif cfg.sampling.type == "EVOS" and step % 100 == 0:
-                    inr_sampler.sample(
-                        inner_step=step, 
-                        graph=graph, 
-                        save_image=True,
-                        epoch=step
-                    )
+            # if cfg.sampling.type != None:
+            #     if cfg.sampling.type != "EVOS" and step % 2500 == 0:
+            #         inr_sampler.sample(
+            #             inner_step=step, 
+            #             graph=graph, 
+            #             save_image=True,
+            #         )
+            #     elif cfg.sampling.type == "EVOS" and step % 100 == 0:
+            #         inr_sampler.sample(
+            #             inner_step=step, 
+            #             graph=graph, 
+            #             save_image=True,
+            #             epoch=step
+            #         )
             test_loss, rel_test_loss = validation_step_single_image(
-                step, graph, inr, 
+                step, graph_ori, inr, 
                 device=device, 
                 use_rel_loss=use_rel_loss,
                 optimizer=optimizer,
-                sampler=inr_sampler,
+                sampler=None,
                 cfg = cfg
                 )
-
+            
             if cfg.wandb.use_wandb:
                 wandb.log(
                     {
@@ -412,13 +391,14 @@ def main(cfg: DictConfig) -> None:
                         "train_rel_loss": rel_train_loss,
                         "test_loss": test_loss,
                         "train_loss": train_loss,
-                        "Time": time() - t0
+                        "Time": total_train_time
                     },
                     step=step
                 )
-                trl_vals_arr[-1] = rel_test_loss
-                time_vals_arr[-1] = time() - t0
-                step_vals_arr[-1] = step
+                
+                trl_vals_arr.append(rel_test_loss)
+                time_vals_arr.append(total_train_time)
+                step_vals_arr.append(step)
             else:
                 print(
                     f"Step {step}, Train Loss: {train_loss:.4f}, "

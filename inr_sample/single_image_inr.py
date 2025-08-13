@@ -337,8 +337,6 @@ def main(cfg: DictConfig) -> None:
     ''' Begin the training process '''
     # log.start_timer("step")
     for step in range(epoch_start, epochs):
-        
-        print(step)
         use_rel_loss = True
         # step_show = step % 10 == 0
         step_show = True

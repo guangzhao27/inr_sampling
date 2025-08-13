@@ -671,9 +671,8 @@ class EVOSSampler:
         # TODO: Pass in number of epochs
 
     def _sampler_get_coords_gt(self, epoch, graph):
-        # coords, gt = self.graph.space_emb, self.graph.feat
-        coords, gt = self.full_coords, self.full_gt
-        # print("---coords---\n" + str(coords) + "\n---full_gt---\n" + str(gt))
+        coords, gt = graph.space_emb, graph.feat
+        # coords, gt = self.full_coords, self.full_gt
         # TODO: Pass in coords and gt
         self.cur_use_ratio = self._get_cur_use_ratio(epoch)
 
@@ -685,7 +684,11 @@ class EVOSSampler:
         else:
             selection_mask = self._evos_get_selection_mask(epoch)
             _coords = self.full_coords[selection_mask]
+            # print("coords")
+            # print(_coords)
             _gt = self.full_gt[selection_mask]
+            # print("gt")
+            # print(_gt)
             # print("***Not Fitness Epoch, Selected Points***\nEpoch" + str(epoch))
             return _coords, _gt, selection_mask
 
@@ -910,9 +913,11 @@ class EVOSSampler:
         return img
 
     def _get_data(self):
+        # coords = self.graph.space_emb    # EVOS coords calculation gets same result
+        # gt = self.graph.feat        # EVOS gt calc doesn't work
         img = self.input_img
         img = self._encode_img(img)
-        gt = img.permute(1, 2, 0).reshape(-1, self.C)  # h*w, C
+        # gt = img.permute(1, 2, 0).reshape(-1, self.C)  # h*w, C
         coords = torch.stack(
             torch.meshgrid(
                 [torch.linspace(-1, 1, self.H), torch.linspace(-1, 1, self.W)],
@@ -920,6 +925,10 @@ class EVOSSampler:
             ),
             dim=-1,
         ).reshape(-1, 2)
+        # print("evos implement gt:")
+        # print(gt)
+        # print("us graph GT")
+        gt = self.graph.feat
         return coords, gt
 
     def sample(
@@ -935,8 +944,8 @@ class EVOSSampler:
 
         if sel_mask != None:
             graph = Data(
-                cor = coords,
-                feat = gt,
+                cor = graph.cor[sel_mask],
+                feat = graph.feat[sel_mask],
                 time = graph.time[sel_mask],
                 space_emb = graph.space_emb[sel_mask],
                 T=graph.T,  # global property (total time frames) remains unchanged
@@ -944,8 +953,8 @@ class EVOSSampler:
             )
         else:
             graph = Data(
-                cor = coords,
-                feat = gt,
+                cor = graph.cor,
+                feat = graph.feat,
                 time = graph.time,
                 space_emb = graph.space_emb,
                 T=graph.T,  # global property (total time frames) remains unchanged

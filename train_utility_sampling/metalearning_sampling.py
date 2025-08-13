@@ -388,8 +388,15 @@ def single_image_step(
         sampler._sampler_compute_loss(features_recon, features, step)
         # I'm unsure if this is operation should still be performed given we use
         # MSE loss
+    # elif not is_train and cfg.sampling.type == "EVOS":
+
     # else:
         # loss = F.mse_loss(features_recon, graph.feat)
+    # if not is_train:
+        # print("GRAPH FEAT:")
+        # print(graph.feat)
+        # print("FEAT RECON")
+        # print(features_recon)
     loss = F.mse_loss(features_recon, graph.feat)
     # print(features_recon.shape, graph.feat.shape)
 

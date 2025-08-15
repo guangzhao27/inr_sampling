@@ -269,7 +269,8 @@ def validation_step(step, val_loader, inr, sub_array_num, device,
 def train_step_single_image(step, graph, inr, device, 
                use_rel_loss, optimizer, 
                sampler=None,
-               cfg=None
+               cfg=None,
+               transform=None
                ):
     
     inr.train()
@@ -286,6 +287,7 @@ def train_step_single_image(step, graph, inr, device,
         sampler=sampler, 
         cfg=cfg,
         optimizer=optimizer,
+        transform=transform
     )
     
     recon = outputs['reconstructions']
@@ -313,7 +315,7 @@ def train_step_single_image(step, graph, inr, device,
 
 def validation_step_single_image(step, graph, inr, device, 
                use_rel_loss, optimizer, 
-               sampler=None, cfg=None
+               sampler=None, cfg=None, transform=None
                ):
     
     inr.eval()
@@ -328,7 +330,8 @@ def validation_step_single_image(step, graph, inr, device,
         return_reconstructions=False,
         use_rel_loss=use_rel_loss,
         sampler=sampler, 
-        cfg = cfg
+        cfg = cfg,
+        transform=transform
     )
     
     

@@ -523,11 +523,11 @@ class INRSingle2dSamplerWrapper(InrSamplerWrapper):
             # In practice, you might want to implement a separate 2D sampling function.
             # Here we assume the graph has been clustered already. 
 
-            if inner_step % 100 == 0:
-                _start = self.n_clusters_2d_start
-                _end = self.n_clusters_2d_end
-                n_clusters = _start + ((_end - _start) / self.epochs) * inner_step
-                graph_2d_cluster_single_image(graph, n_clusters, 0.01, 'grid')
+            # if inner_step % 100 == 0:
+            #     _start = self.n_clusters_2d_start
+            #     _end = self.n_clusters_2d_end
+            #     n_clusters = _start + ((_end - _start) / self.epochs) * inner_step
+            #     graph_2d_cluster_single_image(graph, n_clusters, 0.01, 'grid')
 
             num_per_cluster = max(1, math.ceil(n_samples / len(graph.cluster_set[0])))
             rough_idx = sample_random_node_indices_per_cluster(
@@ -668,28 +668,21 @@ class EVOSSampler:
         return self.use_ratio_scheduler(
             epoch, self.num_epochs, self.cfg.sampling.rate
         )
-        # TODO: Pass in number of epochs
 
     def _sampler_get_coords_gt(self, epoch, graph):
-        coords, gt = graph.space_emb, graph.feat
-        # coords, gt = self.full_coords, self.full_gt
-        # TODO: Pass in coords and gt
+        # coords, gt = graph.space_emb, graph.feat
+        coords, gt = self.full_coords, self.full_gt
+        
         self.cur_use_ratio = self._get_cur_use_ratio(epoch)
 
         self._reset_rng()
  
         if self._evos_is_fitness_eval_iter(epoch):
-            # print("===Fitness Epoch===\nEpoch: " + str(epoch))
             return coords, gt, None
         else:
             selection_mask = self._evos_get_selection_mask(epoch)
             _coords = self.full_coords[selection_mask]
-            # print("coords")
-            # print(_coords)
             _gt = self.full_gt[selection_mask]
-            # print("gt")
-            # print(_gt)
-            # print("***Not Fitness Epoch, Selected Points***\nEpoch" + str(epoch))
             return _coords, _gt, selection_mask
 
         self._recover_rng()
@@ -772,7 +765,6 @@ class EVOSSampler:
             self.sample_num, dtype=torch.bool, device=self.device
         )
         selection_mask[selected_indices] = True
-        # print("===Augmented Unbiased Mutation Reached===\nEpoch: " + str(epoch))
         return selection_mask
 
     def _evos_is_fitness_eval_iter(self, epoch):
@@ -786,7 +778,6 @@ class EVOSSampler:
             _start = self.cfg.sampling.init_interval
             _end = self.cfg.sampling.end_interval
             _cur_interval = _start + ((_end - _start) / self.cfg.optim.epochs) * epoch
-            # print("===cur interval===\n" + str(_cur_interval))
             return int(_cur_interval)
 
     def _evos_frequency_aware_crossover(self, pred, gt, epoch): 
@@ -877,38 +868,27 @@ class EVOSSampler:
         return cur_loss
     
     def compute_mse(self, pred, gt):  # From EVOS base_trainer.py
-        #  return torch.mean((pred - gt) ** 2)
         return F.mse_loss(pred, gt)
 
     def reconstruct_img(self, data) -> torch.tensor:    # From EVOS img_trainer.py
-        # print("===in reconstruct===\n" + str(data))
         img = data.reshape(self.H, self.W, self.C).permute(2, 0, 1)  # c,h,w
-        # print("===pre decode img===\n" + str(img))
         img = self._decode_img(img)
-        # print("===post decode img===\n" + str(img))
         return img
 
     def _decode_img(self, data):    # From EVOS img_trainer.py
         data = self.transform.inverse(data)
         # print("===transform_inverse_data===\n" + str(data))
-        data = data * 255.0
-        data = torch.clamp(data, min=0, max=255)
+        # data = data * 255.0                         # rem
+        # data = torch.clamp(data, min=0, max=255)    # rem
         return data
 
     def _parse_input_data(self):
         img = self.input_img.permute(2, 0, 1)  # c,h,w
-        # print("---img---\n" + str(img))
         self.input_img = img
         self.gt = img
         self.C, self.H, self.W = img.shape
-        # print("---c---\n" + str(self.C))
-        # print("\n---h---\n" + str(self.H))
-        # print("\n---w---\n" + str(self.W))
 
     def _encode_img(self, img):
-        # print("---img before encode---\n" + str(img))
-        img = torch.clamp(img, min=0, max=255)
-        img = img / 255.0
         img = self.transform.tranform(img)
         return img
 
@@ -917,7 +897,7 @@ class EVOSSampler:
         # gt = self.graph.feat        # EVOS gt calc doesn't work
         img = self.input_img
         img = self._encode_img(img)
-        # gt = img.permute(1, 2, 0).reshape(-1, self.C)  # h*w, C
+        gt = img.permute(1, 2, 0).reshape(-1, self.C)  # h*w, C
         coords = torch.stack(
             torch.meshgrid(
                 [torch.linspace(-1, 1, self.H), torch.linspace(-1, 1, self.W)],
@@ -925,10 +905,16 @@ class EVOSSampler:
             ),
             dim=-1,
         ).reshape(-1, 2)
+        # print("get_data gt")
+        # print(gt[:5])
+        # print(gt)
+        # print("evos sampler coords")
+        # print(coords)
+        # print(coords.shape)
         # print("evos implement gt:")
         # print(gt)
         # print("us graph GT")
-        gt = self.graph.feat
+        # gt = self.graph.feat
         return coords, gt
 
     def sample(
@@ -944,17 +930,20 @@ class EVOSSampler:
 
         if sel_mask != None:
             graph = Data(
-                cor = graph.cor[sel_mask],
-                feat = graph.feat[sel_mask],
+                # cor = graph.cor[sel_mask],
+                cor = coords,
+                feat = gt,
                 time = graph.time[sel_mask],
                 space_emb = graph.space_emb[sel_mask],
                 T=graph.T,  # global property (total time frames) remains unchanged
                 # latent_vector=graph.latent_vector  # global latent vector remains unchanged
             )
+
         else:
             graph = Data(
                 cor = graph.cor,
-                feat = graph.feat,
+                # feat = graph.feat,
+                feat = gt,
                 time = graph.time,
                 space_emb = graph.space_emb,
                 T=graph.T,  # global property (total time frames) remains unchanged

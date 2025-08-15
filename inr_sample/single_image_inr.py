@@ -117,6 +117,7 @@ def create_inr_sampler(cfg, inr, graph, current_date_str, run_name, device='cuda
         img = img.unsqueeze(0)
         # print("===img for evos===\n" + str(img))
         # print("===shape for evos===\n" + str(img.shape))
+        print(img)
         return EVOSSampler(cfg, img, graph)
 
     else:
@@ -257,9 +258,19 @@ def main(cfg: DictConfig) -> None:
         space_emb=graph.space_emb[indices_t],
         T=torch.tensor(1),
     )
+    # print("init gt")
+    # print(graph.feat[:5])
+    # print(graph.feat.shape)
+
+    # print("init graph cors")
+    # print(graph.cor)
+    # print(graph.cor.shape)
+    # print("graph features")
     # print(graph.feat)
     graph = graph.to(device)
     graph_ori = graph.clone()
+    # print("graph_ori gt")
+    # print(graph_ori.feat)
     # print("indices ->\n" + str(len(indices_t)))
 
     # print("---time shape---\n", str(graph.time.shape))
@@ -328,8 +339,11 @@ def main(cfg: DictConfig) -> None:
 
     ''' Begin the sampling setting '''
     inr_sampler = create_inr_sampler(cfg, inr, graph, current_date_str, run_name)
+    sampler_transform = None
     if cfg.sampling.type == "EVOS":
         inr_sampler._evos_init()
+        sampler_transform = inr_sampler.transform
+
     
     t_init = time() - t0
     total_train_time += t_init
@@ -351,7 +365,8 @@ def main(cfg: DictConfig) -> None:
             use_rel_loss=use_rel_loss,
             optimizer=optimizer,
             sampler=inr_sampler,
-            cfg = cfg
+            cfg = cfg,
+            transform=sampler_transform
             )
         t_step = time() - t1
         total_train_time += t_step
@@ -379,7 +394,8 @@ def main(cfg: DictConfig) -> None:
                 use_rel_loss=use_rel_loss,
                 optimizer=optimizer,
                 sampler=None,
-                cfg = cfg
+                cfg = cfg,
+                transform=sampler_transform
                 )
             
             if cfg.wandb.use_wandb:

@@ -10,6 +10,7 @@ import seaborn as sns
 import matplotlib.colors as mcolors
 from omegaconf import DictConfig, OmegaConf
 import torch.nn.functional as F
+from components.transform import Transform
 import os
 
 def get_grad_norm(model):
@@ -355,7 +356,8 @@ def single_image_step(
     use_rel_loss=False,
     sampler=None, 
     cfg=None,
-    optimizer=None
+    optimizer=None,
+    transform=None
 ):
     step = iter
     if sampler is not None:
@@ -373,38 +375,14 @@ def single_image_step(
     coords = graph.space_emb
     features_recon = inr(coords)
 
-    # print("---graph---\n" + str(graph) + "\n ---features---\n" + str(features) + "\n ---coords---\n" + str(coords) + "\n ---recon---\n" + str(features_recon))
+    if cfg.sampling.type == "EVOS" and is_train:
+        # features_recon = _decode_img(features_recon, transform)
+        features = _decode_img(features, transform)
 
-    # print(features_recon)
-
-
-    # print("---FR---")
-    # print(features_recon)
-    # print("---PPL---")
-    
-    if is_train and cfg.sampling.type == "EVOS":
-        # print("===p recon===\n" + str(features_recon) + "\n===p features ===\n" + str(features) + "\n===step===\n" + str(step))
-        # loss = sampler._sampler_compute_loss(features_recon, features, step)
+    if sampler is not None and cfg.sampling.type == "EVOS":
         sampler._sampler_compute_loss(features_recon, features, step)
-        # I'm unsure if this is operation should still be performed given we use
-        # MSE loss
-    # elif not is_train and cfg.sampling.type == "EVOS":
 
-    # else:
-        # loss = F.mse_loss(features_recon, graph.feat)
-    # if not is_train:
-        # print("GRAPH FEAT:")
-        # print(graph.feat)
-        # print("FEAT RECON")
-        # print(features_recon)
-    loss = F.mse_loss(features_recon, graph.feat)
-    # print(features_recon.shape, graph.feat.shape)
-
-    # else:
-        # loss = ((features_recon - graph.feat)**2).mean()
-        # if not is_train:
-            # print("---features recon---\n" + str(features_recon.shape))
-            # print("---gt features---\n" + str(graph.feat.shape))
+    loss = F.mse_loss(features_recon, features)
 
     # if iter % 100 == 0 and cfg is not None and optimizer is not None:
     #     per_pix_losses = ((features_recon - graph.feat)**2)
@@ -427,3 +405,7 @@ def single_image_step(
     }
     
     return outputs
+
+def _decode_img(data, transform):    # From EVOS img_trainer.py
+        data = transform.inverse(data)
+        return data

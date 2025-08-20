@@ -61,15 +61,6 @@ inr:
   multi_data: False
   signal_type: "image"
   eval_lpips: False
-  # Check if redundant
-  # hidden_layers: 6
-  # hidden_features: 155
-  # first_omega: 30
-  # hidden_omega: 30
-  # first_bias_scale: None
-  # scale_req_grad: False
-  # N_freqs: 10
-  # scale: 30
 
 wandb:
   use_wandb: False
@@ -93,7 +84,7 @@ sampling:
   end_mutation_ratio: 0.5
   profile_interval_method: "lin_dec"    # "fixed", "lin_dec" 
   init_interval: 100                    # 100
-  end_interval: 50                    #50
+  end_interval: 50                    # 50
   profile_guide: "value"            # "value", "diff_1"
   save_dir: "./log"
   tag: "exp"

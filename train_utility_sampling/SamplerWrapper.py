@@ -271,25 +271,19 @@ class InrSamplerWrapper:
         # Create directory if it doesn't exist
         os.makedirs(self.save_image_path, exist_ok=True)
         
-        # print("graph.t init shape: ", str(graph.T.shape))
-        # Total number of time frames
         if isinstance(graph.T, torch.Tensor) and graph.T.dim() >=1:
             T_show = graph.T[0]
         else:
             T_show = graph.T
-        # print("***cor shape***\n" + str(graph.cor.shape))
         W = graph.cor[:, 0].max()+1
         H = graph.cor[:, 1].max()+1
         
         # Loop over each time frame
-        # for t in range(T_show):
-        # print("T_Show:", str(T_show))
         for t in range(T_show):
             # Mask for all nodes at time t
             frame_mask = (graph.time == t)
             coords = graph.cor[frame_mask].cpu().numpy()
             values = graph.feat[frame_mask].cpu().numpy()
-            # print("---sampled_frame values---\n" + str(values))
             
             # Mask for sampled indices at time t
             sampled_frame_mask = (sampled_graph.time == t)
@@ -379,15 +373,9 @@ def sample_random_node_indices_per_cluster(
                     f"Cluster {cluster_num} has {n} nodes, but requested {num_per_cluster} samples, "
                     "reduce sampling rates or reduce number of clusters."
                 )
-            # k = min(n, num_per_cluster)
             k = num_per_cluster
             perm = torch.randperm(n)[:k]
             chosen = idx_tensor[perm].to(device)
-            # print("Chosen: " + str(chosen.device))
-            # print("idx_tensor: " + str(idx_tensor.device))
-            # print("perm: " + str(perm.device))
-            # print("offset: " + str(offset.device))
-            # chosen.to(device)
             samples.append(chosen+offset)
         return samples
         
@@ -523,18 +511,17 @@ class INRSingle2dSamplerWrapper(InrSamplerWrapper):
             # In practice, you might want to implement a separate 2D sampling function.
             # Here we assume the graph has been clustered already. 
 
-            # if inner_step % 100 == 0:
-            #     _start = self.n_clusters_2d_start
-            #     _end = self.n_clusters_2d_end
-            #     n_clusters = _start + ((_end - _start) / self.epochs) * inner_step
-            #     graph_2d_cluster_single_image(graph, n_clusters, 0.01, 'grid')
+            use_2d_cluster_grid_scheduling = False
+            if inner_step % 100 == 0 and use_2d_cluster_grid_scheduling:
+                _start = self.n_clusters_2d_start
+                _end = self.n_clusters_2d_end
+                n_clusters = _start + ((_end - _start) / self.epochs) * inner_step
+                graph_2d_cluster_single_image(graph, n_clusters, 0.01, 'grid')
 
             num_per_cluster = max(1, math.ceil(n_samples / len(graph.cluster_set[0])))
             rough_idx = sample_random_node_indices_per_cluster(
                 graph, cluster_dim='2d', num_per_cluster=num_per_cluster
                 )
-            # print("rough_idx: " + str(rough_idx.shape))
-            # print("num_per_cluster: " + str(num_per_cluster))
             space_emb = graph.space_emb[rough_idx].to(self.device)  # [N_rough, D]
             feats = graph.feat[rough_idx].to(self.device)  # [N_rough, F]
             with torch.no_grad():
@@ -546,8 +533,6 @@ class INRSingle2dSamplerWrapper(InrSamplerWrapper):
             # sampling_weight = torch.ones_like(sampled_idx, dtype=torch.float32)
         else:
             raise NotImplementedError(f"Sampling type {self.sample_type} is not implemented.")
-        
-        # print("---sampled_idx---" + str(sampled_idx))
 
         sampled_graph = Data(
             cor=graph.cor[sampled_idx],
@@ -555,8 +540,6 @@ class INRSingle2dSamplerWrapper(InrSamplerWrapper):
             feat=graph.feat[sampled_idx],
             space_emb=graph.space_emb[sampled_idx],
         )
-
-        # print("---sampled_graph---" + str(sampled_graph))
         
         if save_image:
             self.save_image_path = os.path.join(self.save_samples_path, f"2d_i{inner_step}")
@@ -565,7 +548,6 @@ class INRSingle2dSamplerWrapper(InrSamplerWrapper):
             self._save_sample_images(graph, sampled_graph, dif=dif)
         return sampled_graph
 
-# 2d cluster sampler
 def graph_2d_cluster_single_image(graph, n_segments, compactness=1, cluster_type='slic'):
     T = graph.T.sum()
     
@@ -669,8 +651,7 @@ class EVOSSampler:
             epoch, self.num_epochs, self.cfg.sampling.rate
         )
 
-    def _sampler_get_coords_gt(self, epoch, graph):
-        # coords, gt = graph.space_emb, graph.feat
+    def _sampler_get_coords_gt(self, epoch):
         coords, gt = self.full_coords, self.full_gt
         
         self.cur_use_ratio = self._get_cur_use_ratio(epoch)
@@ -679,13 +660,10 @@ class EVOSSampler:
  
         if self._evos_is_fitness_eval_iter(epoch):
             return coords, gt, None
-        else:
-            selection_mask = self._evos_get_selection_mask(epoch)
-            _coords = self.full_coords[selection_mask]
-            _gt = self.full_gt[selection_mask]
-            return _coords, _gt, selection_mask
-
-        self._recover_rng()
+        
+        selection_mask = self._evos_get_selection_mask(epoch)
+        _coords = self.full_coords[selection_mask]
+        _gt = self.full_gt[selection_mask]
         return _coords, _gt, selection_mask
 
     def _sampler_compute_loss(self, pred, gt, epoch):
@@ -715,10 +693,8 @@ class EVOSSampler:
                     )
                     .flatten()[~_mask]
                     .mean()
-                )
-                
+                )          
         return mse + self.cfg.sampling.lap_coff * lap_loss
-
 
     def _evos_get_mutation_ratio(self, epoch):
         if self.cfg.sampling.mutation_method == "constant":
@@ -782,7 +758,6 @@ class EVOSSampler:
 
     def _evos_frequency_aware_crossover(self, pred, gt, epoch): 
         error_map = F.mse_loss(pred, gt, reduction="none").mean(1)
-        # print("***FA Crossover Reached***\nEpoch: " + str(epoch))
         if self.cfg.sampling.crossover_method == "add":
             r_img = self.reconstruct_img(pred)
             laplace_map = F.mse_loss(
@@ -810,9 +785,7 @@ class EVOSSampler:
         self.book["sorted_map_index"] = sorted_map_index
 
         if self.cfg.sampling.crossover_method == "select":
-            # print("===pred===\n" + str(pred))
             r_img = self.reconstruct_img(pred)
-            # print("devices---->r_img: " + str(r_img.device) + " cached_gt_lap: " + str(self.cached_gt_lap.device))
             laplace_map = F.mse_loss(
                 compute_laplacian(r_img).squeeze(), self.cached_gt_lap, reduction="none"
             )
@@ -877,9 +850,6 @@ class EVOSSampler:
 
     def _decode_img(self, data):    # From EVOS img_trainer.py
         data = self.transform.inverse(data)
-        # print("===transform_inverse_data===\n" + str(data))
-        # data = data * 255.0                         # rem
-        # data = torch.clamp(data, min=0, max=255)    # rem
         return data
 
     def _parse_input_data(self):
@@ -893,8 +863,6 @@ class EVOSSampler:
         return img
 
     def _get_data(self):
-        # coords = self.graph.space_emb    # EVOS coords calculation gets same result
-        # gt = self.graph.feat        # EVOS gt calc doesn't work
         img = self.input_img
         img = self._encode_img(img)
         gt = img.permute(1, 2, 0).reshape(-1, self.C)  # h*w, C
@@ -905,16 +873,6 @@ class EVOSSampler:
             ),
             dim=-1,
         ).reshape(-1, 2)
-        # print("get_data gt")
-        # print(gt[:5])
-        # print(gt)
-        # print("evos sampler coords")
-        # print(coords)
-        # print(coords.shape)
-        # print("evos implement gt:")
-        # print(gt)
-        # print("us graph GT")
-        # gt = self.graph.feat
         return coords, gt
 
     def sample(
@@ -923,31 +881,25 @@ class EVOSSampler:
         inner_step=1, 
         modulations: torch.Tensor=None, 
         save_image=False):
-        # Get coords function
-        # Return the output in Data() structure to fit inr_sampling pipeline
-        # print(inner_step)
-        coords, gt, sel_mask = self._sampler_get_coords_gt(inner_step, graph)
+
+        coords, gt, sel_mask = self._sampler_get_coords_gt(inner_step)
 
         if sel_mask != None:
             graph = Data(
-                # cor = graph.cor[sel_mask],
                 cor = coords,
                 feat = gt,
                 time = graph.time[sel_mask],
                 space_emb = graph.space_emb[sel_mask],
                 T=graph.T,  # global property (total time frames) remains unchanged
-                # latent_vector=graph.latent_vector  # global latent vector remains unchanged
             )
 
         else:
             graph = Data(
                 cor = graph.cor,
-                # feat = graph.feat,
                 feat = gt,
                 time = graph.time,
                 space_emb = graph.space_emb,
                 T=graph.T,  # global property (total time frames) remains unchanged
-                # latent_vector=graph.latent_vector  # global latent vector remains unchanged
             )
 
         return graph

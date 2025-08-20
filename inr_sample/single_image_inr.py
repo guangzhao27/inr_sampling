@@ -115,8 +115,6 @@ def create_inr_sampler(cfg, inr, graph, current_date_str, run_name, device='cuda
     elif sampling_type == "EVOS":
         img = graph.feat.reshape(512,512)
         img = img.unsqueeze(0)
-        # print("===img for evos===\n" + str(img))
-        # print("===shape for evos===\n" + str(img.shape))
         print(img)
         return EVOSSampler(cfg, img, graph)
 
@@ -199,8 +197,6 @@ def main(cfg: DictConfig) -> None:
 
     device = torch.device("cuda")
     set_seed(seed)
-    
-   
    
     """ define dataset """    
     if dataset_name == "NS":
@@ -217,7 +213,6 @@ def main(cfg: DictConfig) -> None:
         
         feat_transform, feat_inv_transform = None, None
     elif dataset_name == "SOMA":
-        # raw_np_dir = '/pscratch/sd/g/gzhao27/INR/SOMA/results/impliciBottomDrag_np'
         input_dim = 3
         output_dim = 1
         feature_set = [10]
@@ -242,13 +237,8 @@ def main(cfg: DictConfig) -> None:
     val_loader = DataLoader(dataset=valset, batch_size=batch_size, shuffle=False, collate_fn=collate_graph_inr)
     test_loader = DataLoader(dataset=testset, batch_size=batch_size, shuffle=False, collate_fn=collate_graph_inr)
 
-    # print("train", len(trainset))
-    # print("val", len(valset))
-
-    # print("len train_loader:\n", str(len(train_loader)))
     graph = next(iter(train_loader))
     t = cfg.data.single_time_frame  # Use this to time frame (For h5py)
-    # t = 10  # Use this to time frame
     indices_t = get_graph_t_idx(graph, t)
 
     graph = Data(
@@ -258,26 +248,9 @@ def main(cfg: DictConfig) -> None:
         space_emb=graph.space_emb[indices_t],
         T=torch.tensor(1),
     )
-    # print("init gt")
-    # print(graph.feat[:5])
-    # print(graph.feat.shape)
-
-    # print("init graph cors")
-    # print(graph.cor)
-    # print(graph.cor.shape)
-    # print("graph features")
-    # print(graph.feat)
+    
     graph = graph.to(device)
     graph_ori = graph.clone()
-    # print("graph_ori gt")
-    # print(graph_ori.feat)
-    # print("indices ->\n" + str(len(indices_t)))
-
-    # print("---time shape---\n", str(graph.time.shape))
-    # print("---T---\n", str(graph.T))
-    # print("---initial graph---\n" + str(graph) + "\n---coordinates---\n" + str(graph.cor))
-    # print("---features---\n" + str(graph.feat) + "\n---time---\n" + str(graph.time))
-    # print("---space_emb---\n" + str(graph.space_emb) + "\n---T---\n" + str(graph.T) + "\n---end---")
 
     log.start_timer("final")
     total_train_time = 0
@@ -286,7 +259,7 @@ def main(cfg: DictConfig) -> None:
     """ Initialize model, optimizer """
     inr = create_inr_instance(
         cfg, input_dim=input_dim, output_dim=output_dim, device=device
-    )  # add sampler to model
+    )
     trainable_params = sum(p.numel() for p in inr.parameters() if p.requires_grad)
     print("inr model parameters:", {trainable_params})
     
@@ -302,13 +275,11 @@ def main(cfg: DictConfig) -> None:
         lr=lr_inr,
         weight_decay=0,
     )
-    if cfg.sampling.type == "EVOS":
+    if cfg.sampling.type == "EVOS": # EVOS uses 1 based indexing for epochs
         epoch_start = 1
-    else:   # EVOS uses 1 based indexing for epochs
+    else:
         epoch_start = 0
     best_loss = np.inf
-    
-
     
     """ Update model and optimizer with checkpoint"""
     if saved_checkpoint:
@@ -320,45 +291,26 @@ def main(cfg: DictConfig) -> None:
         cfg = checkpoint['cfg']
         print("epoch_start, alpha, best_loss", epoch_start, alpha.item(), best_loss)
 
-    # if cfg.wandb.use_wandb:
-    #     wandb.log({"results_dir": str(RESULTS_DIR)}, step=epoch_start, commit=False)
-    
-    # if cfg.sampling.type in ['3d_cluster']:
-    #     cluster_dim = '2d'
-    #     add_cluster_label(train_loader, 1000, 0.01, cluster_dim=cluster_dim)
-    #     add_cluster_label(val_loader, 1000, 0.01, cluster_dim=cluster_dim)
-    
-    # graph = Data(
-    #     cor=graph.cor[indices_t],
-    #     feat=graph.feat[indices_t],
-    #     time=torch.full((len(indices_t),), 995, dtype=torch.long),  # actual time
-    #     space_emb=graph.space_emb[indices_t],
-    #     T=torch.tensor(1000),
-    # )
-
-
     ''' Begin the sampling setting '''
     inr_sampler = create_inr_sampler(cfg, inr, graph, current_date_str, run_name)
     sampler_transform = None
     if cfg.sampling.type == "EVOS":
         inr_sampler._evos_init()
         sampler_transform = inr_sampler.transform
-
     
     t_init = time() - t0
     total_train_time += t_init
-    # Main Training Loop
     ''' Begin the training process '''
-    # log.start_timer("step")
     for step in range(epoch_start, epochs):
+
+        # Interval at which validation loss is calculated
         use_rel_loss = True
-        # step_show = step % 10 == 0
         step_show = True
         step_show_last = step == epochs - 1
 
         # Start Timer
-
         t1 = time()
+
         train_loss, rel_train_loss, grad_norm = train_step_single_image(
             step, graph, inr, 
             device=device,
@@ -374,20 +326,16 @@ def main(cfg: DictConfig) -> None:
         torch.cuda.synchronize()    
 
         if True in (step_show, step_show_last):
-            # if cfg.sampling.type != None:
-            #     if cfg.sampling.type != "EVOS" and step % 2500 == 0:
-            #         inr_sampler.sample(
-            #             inner_step=step, 
-            #             graph=graph, 
-            #             save_image=True,
-            #         )
-            #     elif cfg.sampling.type == "EVOS" and step % 100 == 0:
-            #         inr_sampler.sample(
-            #             inner_step=step, 
-            #             graph=graph, 
-            #             save_image=True,
-            #             epoch=step
-            #         )
+            # Generate figures of sampled coordinates overlaying train image
+            generate_sampled_frames=True
+            if cfg.sampling.type != None:
+                if cfg.sampling.type != "EVOS" and step % 100 == 0 and generate_sampled_frames:
+                    inr_sampler.sample(
+                        inner_step=step, 
+                        graph=graph, 
+                        save_image=True,
+                    )
+
             test_loss, rel_test_loss = validation_step_single_image(
                 step, graph_ori, inr, 
                 device=device, 
@@ -446,17 +394,19 @@ def main(cfg: DictConfig) -> None:
     t1 = time()
     total = t1-t0
     print("TIME:", str(total))
-
-    # Output stats to file
-    # with open('/sdcc/u/smccue/projects/inr_sampling/visuals/out.txt', 'a') as f:
-    #     trl_vals = (','.join(str(v) for v in trl_vals_arr))
-    #     time_vals = (','.join(str(v) for v in time_vals_arr))
-    #     step_vals = (','.join(str(v) for v in step_vals_arr))
-    #     print(str(cfg.sampling.type) + 
-    #             "\ntrl\n" + str(trl_vals) +
-    #             "\ntime\n" + str(time_vals) +
-    #             "\nstep\n" + str(step_vals),
-    #             file=f)  # Python 3.x
+    
+    # Output losses and times to file for visualization in poster_vis.ipynb
+    comparison_vis_output = False
+    if comparison_vis_output:
+        with open('/sdcc/u/smccue/projects/inr_sampling/visuals/out.txt', 'a') as f:
+            trl_vals = (','.join(str(v) for v in trl_vals_arr))
+            time_vals = (','.join(str(v) for v in time_vals_arr))
+            step_vals = (','.join(str(v) for v in step_vals_arr))
+            print(str(cfg.sampling.type) + 
+                    "\ntrl\n" + str(trl_vals) +
+                    "\ntime\n" + str(time_vals) +
+                    "\nstep\n" + str(step_vals),
+                    file=f)  # Python 3.x
 
     return rel_test_loss
 

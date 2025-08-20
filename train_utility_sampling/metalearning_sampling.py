@@ -13,92 +13,6 @@ import torch.nn.functional as F
 from components.transform import Transform
 import os
 
-def get_grad_norm(model):
-    grads = []
-    for param in model.parameters():
-        if param.grad is not None:
-            grads.append(param.grad.detach().view(-1))
-    concat_grads = torch.cat(grads)
-    total_norm = torch.norm(concat_grads)
-    return total_norm
-
-def grad_norm_per_pixel(model, per_pix_losses, optimizer):
-    pix_norms = []
-    all_pix_grads = []
-    losses = per_pix_losses.view(-1)
-    len_losses = len(losses)
-
-    for i, pix_loss in enumerate(losses):
-        pix_grads = []
-        optimizer.zero_grad()
-        pix_loss.backward(retain_graph=True)
-        for param in model.parameters():
-            if param.grad is not None:
-                pix_grads.append(param.grad.detach().view(-1))
-        concat_grads = torch.cat(pix_grads)
-        all_pix_grads.append(concat_grads)
-        final_pix_norm = torch.norm(concat_grads)
-        pix_norms.append(final_pix_norm.item())
-
-    return pix_norms, all_pix_grads
-
-def grad_norm_pixel_image(pix_norms, step, cfg):
-    norms_matrix = np.array(pix_norms).reshape(64, 64)
-    plt.figure(figsize=(12,12))
-    sns.heatmap(
-        norms_matrix,
-        linewidths=0.5,
-        norm=mcolors.LogNorm(),
-        xticklabels=False,
-        yticklabels=False)
-    depth = cfg.inr.depth
-    title = f'Per-Pixel Grad Norms Step {step} Depth {depth}'
-    plt.title(title)
-    parent_dir = "/sdcc/u/smccue/projects/inr_sampling/visuals/norms"
-    path = os.path.join(parent_dir, f"depth_{depth}")
-    try:
-        os.makedirs(path, exist_ok=True)
-        print("Directory created")
-    except OSError as error:
-        print("Directory can not be created")
-
-    save_path = f"/sdcc/u/smccue/projects/inr_sampling/visuals/norms/depth_{depth}/pixel_grad_norms_depth_{depth}_step_{step}.png"
-    plt.savefig(save_path)
-    plt.close()
-    
-def gradient_similarity(pix_norms, pix_grads, step, cfg, loss, optimizer, inr):
-    depth = cfg.inr.depth
-    print("pix grads shape: " + str(len(pix_grads)))
-    sel = pix_grads[2080].view(-1)
-    similarities = []
-    cos = nn.CosineSimilarity(dim=0)
-    for grad in pix_grads:
-        similarities.append(abs(cos(sel, grad.view(-1)).item()))
-    similarity_matrix = np.array(similarities).reshape(64, 64)
-    print(similarity_matrix)
-    plt.figure(figsize=(12,12))
-    sns.heatmap(
-        similarity_matrix,
-        cmap="hot",
-        linewidths=0.0,
-        # norm=mcolors.LogNorm(),
-        xticklabels=False,
-        yticklabels=False)
-    depth = cfg.inr.depth
-    title = f'Gradient Correlation Step {step} Depth {depth} {cfg.sampling.type}'
-    plt.title(title)
-    parent_dir = "/sdcc/u/smccue/projects/inr_sampling/visuals/norms"
-    path = os.path.join(parent_dir, f"depth_{depth}/correlation/{cfg.sampling.type}")
-    try:
-        os.makedirs(path, exist_ok=True)
-        print("Directory created")
-    except OSError as error:
-        print("Directory can not be created")
-
-    save_path = f"/sdcc/u/smccue/projects/inr_sampling/visuals/norms/depth_{depth}/correlation/{cfg.sampling.type}/gradient_correlation_depth_{depth}_step_{step}.png"
-    plt.savefig(save_path)
-    plt.close()
-
 def graph_inner_loop(
     func_rep,
     graph_ori,
@@ -132,9 +46,7 @@ def graph_inner_loop(
     fitted_modulations = torch.zeros_like(graph_ori.latent_vector).requires_grad_()
     
     for inner_step in range(inner_steps):
-        # print("In the inner step")
         if sampler is not None:
-            # print("Reached the sample step")
             graph = sampler.sample(
                 outer_step=outer_step, 
                 inner_step=inner_step, 
@@ -146,10 +58,7 @@ def graph_inner_loop(
         coords = graph.space_emb
         features = graph.feat
         batch_index = graph.time
-        # TODO: graph = inr.sample(graph, sample_params)
-        # coords = graph.space_emb
-        # features = graph.feat
-        # graph = sampler.sample(step, graph, sample_params)
+        
         if gradient_checkpointing:
             fitted_modulations = cp.checkpoint(
                 graph_inner_loop_step,
@@ -228,30 +137,6 @@ def graph_inner_loop_step(
         #    nn.utils.clip_grad_value_(grad, clip_grad_value)
     # Perform single gradient descent step
     return modulations - inner_lr * grad
-
-def mse_points_image(per_pix_losses, step, cfg):
-    plt.figure(figsize=(12,12))
-    sns.heatmap(
-        per_pix_losses,
-        cmap="YlOrBr",
-        linewidths=0.5,
-        norm=mcolors.LogNorm(),
-        xticklabels=False,
-        yticklabels=False)
-    depth = cfg.inr.depth
-    title = f'Per-Pixel Losses Step {step} Depth {depth}'
-    plt.title(title)
-    parent_dir = "/sdcc/u/smccue/projects/inr_sampling/visuals/norms"
-    path = os.path.join(parent_dir, f"depth_{depth}")
-    try:
-        os.makedirs(path, exist_ok=True)
-        print("Directory created")
-    except OSError as error:
-        print("Directory can not be created")
-
-    save_path = f"/sdcc/u/smccue/projects/inr_sampling/visuals/norms/depth_{depth}/pixel_mse_depth_{depth}_step_{step}.png"
-    plt.savefig(save_path)
-    plt.close()
 
 def graph_outer_step(
     func_rep,
@@ -375,28 +260,26 @@ def single_image_step(
     coords = graph.space_emb
     features_recon = inr(coords)
 
-    if cfg.sampling.type == "EVOS" and is_train:
-        # features_recon = _decode_img(features_recon, transform)
-        features = _decode_img(features, transform)
-
     if sampler is not None and cfg.sampling.type == "EVOS":
+        if is_train:
+            features = _decode_img(features, transform)
         sampler._sampler_compute_loss(features_recon, features, step)
 
     loss = F.mse_loss(features_recon, features)
 
-    # if iter % 100 == 0 and cfg is not None and optimizer is not None:
-    #     per_pix_losses = ((features_recon - graph.feat)**2)
-    # #     pix_norms, pix_grads = grad_norm_per_pixel(inr, per_pix_losses, optimizer)
-    #     # grad_norm_pixel_image(pix_norms, step, cfg)
-    #     # gradient_similarity(pix_norms, pix_grads, step, cfg, loss, optimizer, inr)
-    #     # print(per_pix_losses)
-    #     # print("---PLL---")
-    #     pix_losses_list = per_pix_losses.mean(dim=1).cpu().detach().tolist()
-    #     # print(pix_losses_list)
-    #     # print("---MATRIX---")
-    #     matrix = np.array(pix_losses_list).reshape(512, 512)
-    #     # print(matrix)
-    #     mse_points_image(matrix, step, cfg)
+    '''
+    Used to create image of gradient norms per pixel, per pixel losses, and
+    gradient similarity
+    '''
+    gradient_figures = False
+    if iter % 100 == 0 and cfg is not None and optimizer is not None and gradient_figures:
+        per_pix_losses = ((features_recon - graph.feat)**2)
+        pix_norms, pix_grads = grad_norm_per_pixel(inr, per_pix_losses, optimizer)
+        grad_norm_pixel_image(pix_norms, step, cfg)
+        gradient_similarity(pix_norms, pix_grads, step, cfg, loss, optimizer, inr)
+        pix_losses_list = per_pix_losses.mean(dim=1).cpu().detach().tolist()
+        matrix = np.array(pix_losses_list).reshape(512, 512)
+        mse_points_image(matrix, step, cfg)
 
     outputs = {
         "loss": loss,
@@ -406,6 +289,121 @@ def single_image_step(
     
     return outputs
 
-def _decode_img(data, transform):    # From EVOS img_trainer.py
+# From EVOS img_trainer.py
+def _decode_img(data, transform):
         data = transform.inverse(data)
         return data
+
+'''
+Collection of functions used for calculating and visualizing the MSE per-pixel 
+losses, gradient norms, and gradient similarities
+'''
+def get_grad_norm(model):
+    grads = []
+    for param in model.parameters():
+        if param.grad is not None:
+            grads.append(param.grad.detach().view(-1))
+    concat_grads = torch.cat(grads)
+    total_norm = torch.norm(concat_grads)
+    return total_norm
+
+def grad_norm_per_pixel(model, per_pix_losses, optimizer):
+    pix_norms = []
+    all_pix_grads = []
+    losses = per_pix_losses.view(-1)
+    len_losses = len(losses)
+
+    for i, pix_loss in enumerate(losses):
+        pix_grads = []
+        optimizer.zero_grad()
+        pix_loss.backward(retain_graph=True)
+        for param in model.parameters():
+            if param.grad is not None:
+                pix_grads.append(param.grad.detach().view(-1))
+        concat_grads = torch.cat(pix_grads)
+        all_pix_grads.append(concat_grads)
+        final_pix_norm = torch.norm(concat_grads)
+        pix_norms.append(final_pix_norm.item())
+
+    return pix_norms, all_pix_grads
+
+def grad_norm_pixel_image(pix_norms, step, cfg):
+    norms_matrix = np.array(pix_norms).reshape(64, 64)
+    plt.figure(figsize=(12,12))
+    sns.heatmap(
+        norms_matrix,
+        linewidths=0.5,
+        norm=mcolors.LogNorm(),
+        xticklabels=False,
+        yticklabels=False)
+    depth = cfg.inr.depth
+    title = f'Per-Pixel Grad Norms Step {step} Depth {depth}'
+    plt.title(title)
+    parent_dir = "/sdcc/u/smccue/projects/inr_sampling/visuals/norms"
+    path = os.path.join(parent_dir, f"depth_{depth}")
+    try:
+        os.makedirs(path, exist_ok=True)
+        print("Directory created")
+    except OSError as error:
+        print("Directory can not be created")
+
+    save_path = f"/sdcc/u/smccue/projects/inr_sampling/visuals/norms/depth_{depth}/pixel_grad_norms_depth_{depth}_step_{step}.png"
+    plt.savefig(save_path)
+    plt.close()
+    
+def gradient_similarity(pix_norms, pix_grads, step, cfg, loss, optimizer, inr):
+    depth = cfg.inr.depth
+    print("pix grads shape: " + str(len(pix_grads)))
+    sel = pix_grads[2080].view(-1)
+    similarities = []
+    cos = nn.CosineSimilarity(dim=0)
+    for grad in pix_grads:
+        similarities.append(abs(cos(sel, grad.view(-1)).item()))
+    similarity_matrix = np.array(similarities).reshape(64, 64)
+    print(similarity_matrix)
+    plt.figure(figsize=(12,12))
+    sns.heatmap(
+        similarity_matrix,
+        cmap="hot",
+        linewidths=0.0,
+        # norm=mcolors.LogNorm(),
+        xticklabels=False,
+        yticklabels=False)
+    depth = cfg.inr.depth
+    title = f'Gradient Correlation Step {step} Depth {depth} {cfg.sampling.type}'
+    plt.title(title)
+    parent_dir = "/sdcc/u/smccue/projects/inr_sampling/visuals/norms"
+    path = os.path.join(parent_dir, f"depth_{depth}/correlation/{cfg.sampling.type}")
+    try:
+        os.makedirs(path, exist_ok=True)
+        print("Directory created")
+    except OSError as error:
+        print("Directory can not be created")
+
+    save_path = f"/sdcc/u/smccue/projects/inr_sampling/visuals/norms/depth_{depth}/correlation/{cfg.sampling.type}/gradient_correlation_depth_{depth}_step_{step}.png"
+    plt.savefig(save_path)
+    plt.close()
+
+def mse_points_image(per_pix_losses, step, cfg):
+    plt.figure(figsize=(12,12))
+    sns.heatmap(
+        per_pix_losses,
+        cmap="YlOrBr",
+        linewidths=0.5,
+        norm=mcolors.LogNorm(),
+        xticklabels=False,
+        yticklabels=False)
+    depth = cfg.inr.depth
+    title = f'Per-Pixel Losses Step {step} Depth {depth}'
+    plt.title(title)
+    parent_dir = "/sdcc/u/smccue/projects/inr_sampling/visuals/norms"
+    path = os.path.join(parent_dir, f"depth_{depth}")
+    try:
+        os.makedirs(path, exist_ok=True)
+        print("Directory created")
+    except OSError as error:
+        print("Directory can not be created")
+
+    save_path = f"/sdcc/u/smccue/projects/inr_sampling/visuals/norms/depth_{depth}/pixel_mse_depth_{depth}_step_{step}.png"
+    plt.savefig(save_path)
+    plt.close()

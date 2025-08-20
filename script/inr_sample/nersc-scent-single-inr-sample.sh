@@ -8,16 +8,16 @@
 #SBATCH --gres=gpu:1
 
 w0=13
-sampling_rate=0.01
+sampling_rate=0.2
 train_ratio=1
 inner_steps=6
 lr=5.6e-5 # 5.6e-5 non full 
 depth=6
 n_start=100
-n_finish=10000
+n_finish=4000
 
 # null NMT random 2d_cluster_slic 2d_cluster_grid EVOS
-for sample_type in 2d_cluster_grid
+for sample_type in EVOS
 do
     run_name="SCENT_single_${sample_type}_${sampling_rate}_lr_${lr}_depth_${depth}_end_${n_finish}"
 

@@ -1,0 +1,9 @@
+components/nmt/__pycache__/*
+components/__pycache__/*
+components/lmc/__pycache__/*
+util/__pycache__/*
+*/__pycache__/*
+utils/data/__pycache__/*
+*.ipynb
+*.pyc
+__pycache__/

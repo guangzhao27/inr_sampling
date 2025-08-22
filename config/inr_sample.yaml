@@ -14,9 +14,9 @@ saved_checkpoint : False
 checkpoint_path :
 
 data:
-  data_path: "/sdcc/u/smccue/projects/inr_sampling/scent_data/1k"
+  data_path: "/pscratch/sd/g/gzhao27/INR/data/NS2d/ns_mmap"
   data_type: mmap
-  mmap_dir: '/sdcc/u/smccue/projects/inr_sampling/mmap_save'
+  mmap_dir: '/pscratch/sd/g/gzhao27/INR/SOMA/results/soma_mmap_save'
   dataset_name: "shallow-water-dino" 
   data_to_encode:
   missing_rate:

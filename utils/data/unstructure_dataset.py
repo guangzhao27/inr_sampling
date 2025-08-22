@@ -1032,12 +1032,17 @@ def create_soma_dataset(ntrain, mmap_dir, space_factor, time_factor, latent_dim,
     
     return trainset, valset, testset, feat_transform, feat_inv_transform
 # Original split ratios: 0.7, 0.15, 0.15
-def create_ns_dataset(datapath, latent_dim, space_factor=1, split_ratios=(0.5, 0.25, 0.25), seed=42, data_type='mmap'):
+def create_ns_dataset(datapath, latent_dim=256, space_factor=1, split_ratios=(0.5, 0.25, 0.25), seed=42, data_type='mmap', single_image=False):
     """
     Randomly split indices into train/val/test based on given ratios.
     Optionally saves to JSON so splits can be reused.
     default datapath: "/pscratch/sd/g/gzhao27/INR/data/NS2d/ns_mmap"
     scent datapth: /pscratch/sd/g/gzhao27/INR/data/scent_data/1k
+    
+    The original data is in the shape of (N, T, H, W), where T is time, H is height, W is width, and N is the number of samples.
+    And the function transposes the data to (T, H, W, N) for further processing.
+    In the dataset GraphNavierStokesSampling, the data is transformed back to  (N, H, W, T).
+    
     npy datapah: 
     """
     
@@ -1053,7 +1058,7 @@ def create_ns_dataset(datapath, latent_dim, space_factor=1, split_ratios=(0.5, 0
             # total_samples = len(raw)
         else:
             raise NotImplementedError()
-    elif data_type == 'hdf5':
+    elif datapath.endswith('hdft'):
         with h5py.File(datapath, 'r') as f:
             f = h5py.File(datapath, 'r')
             raw = f['particles']
@@ -1072,14 +1077,22 @@ def create_ns_dataset(datapath, latent_dim, space_factor=1, split_ratios=(0.5, 0
         # print("First two time-slices shape:", str(raw[..., :2].shape))
         # print("Particles shape: " + str(f['particles'].shape[-1]))
         # print("Particles raw: " + str(f['particles']))
-    elif data_type == 'npy':
+    elif datapath.endswith('npy'):
         raw = np.load(datapath)
-        raw = raw.squeeze()
-        
+        # raw = raw.squeeze()
         raw = np.transpose(raw, (1, 2, 3, 0))
         # total_samples = raw.shape[3]
     else:
         raise NotImplementedError()
+    
+    if single_image:
+        chosen_N = 0    # Currently 0-3
+        sel_array = raw[..., slice(chosen_N,chosen_N + 1)]
+        trainset = GraphNavierStokesSampling(
+            raw = sel_array,
+            ssub=space_factor, 
+            )
+        return trainset
 
     total_samples = raw.shape[-1]
     np.random.seed(seed)
@@ -1145,7 +1158,7 @@ def create_ns_dataset(datapath, latent_dim, space_factor=1, split_ratios=(0.5, 0
 #     train_end = int(split_ratios[0] * total_samples)
 #     val_end = train_end + int(split_ratios[1] * total_samples)
 #     test_end = train_end+val_end +int(split_ratios[2] * total_samples)
-
+    
 
 def get_graph_t_idx(graph, t) -> torch.Tensor:
     indices_t = (graph.time == t).nonzero(as_tuple=True)[0]

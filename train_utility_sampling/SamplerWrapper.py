@@ -23,6 +23,7 @@ from components.nmt import mt_scheduler_factory
 from components.transform import Transform
 import torch.nn.functional as F
 from tqdm import trange
+from time import time
 
 class InrSamplerWrapper:
     """
@@ -80,6 +81,7 @@ class InrSamplerWrapper:
                 #  save_losses_path: Path=Path("logs/losses"),
                 #  save_name: str=None,
                 save_interval: int=100,
+                image_width: int=512,
                 ):
         self.n_clusters_2d_start = n_clusters_2d_start
         self.n_clusters_2d_end = n_clusters_2d_end
@@ -94,6 +96,7 @@ class InrSamplerWrapper:
         self.iters = iters
         self.save_interval = save_interval
         self.save_samples_path = save_samples_path
+        self.image_width = image_width
 
     def sample(self, outer_step: int, inner_step: int, graph: Data, modulations: torch.Tensor=None, save_image=False, ) -> Data:
         """
@@ -516,7 +519,30 @@ class INRSingle2dSamplerWrapper(InrSamplerWrapper):
                 features = graph.feat
                 dif = torch.sum(torch.abs(features - preds), 1)
                 _, sampled_idx = torch.topk(dif, n_samples)
-        elif self.sample_type == "2d_cluster":
+        elif self.sample_type == '2d_cluster':
+            # t0 = time()
+            _start = self.n_clusters_2d_start
+            _end = self.n_clusters_2d_end
+            n_bins= np.round(_start + ((_end - _start) / self.epochs) * inner_step).astype(int)
+            bounds = generate_equal_bins(0, self.image_width-1, n_bins, device='cpu')  # Example usage on CPU
+            cor = sample_multiple_from_intervals(bounds, n_bins*2, device='cpu')  # Example usage on CPU
+            cor1 = cor[:, :n_bins]
+            cor2 = cor[:, n_bins:].T
+            rough_idx = (cor1 * self.image_width + cor2).flatten().to(self.device)
+            space_emb = graph.space_emb[rough_idx].to(self.device)  # [N_rough, D]
+            feats = graph.feat[rough_idx].to(self.device)  # [N_rough, F]
+            # print(" time for 2d_cluster sampling rough idx: ", str(time()-t0))
+            # t0 = time()
+            with torch.no_grad():
+                preds = self.model(space_emb)
+                dif = torch.sum((feats - preds).abs(), dim=1)
+            n_samples = min(n_samples, len(dif))
+            _, topk_local = torch.topk(dif, n_samples)
+            sampled_idx = rough_idx[topk_local]
+            # print("time for 2d_cluster sampling: ", str(cal_time))
+            
+            
+        elif self.sample_type == "2d_cluster_slic":
             # For 2D graphs, we can still use the 3D cluster sampling function
             # but it will sample from the 2D clusters.
             # This is a workaround to use the same sampling function.
@@ -528,11 +554,21 @@ class INRSingle2dSamplerWrapper(InrSamplerWrapper):
                 _end = self.n_clusters_2d_end
                 n_clusters = _start + ((_end - _start) / self.epochs) * inner_step
                 graph_2d_cluster_single_image(graph, n_clusters, 0.01, 'grid')
+            
+            
+            _start = self.n_clusters_2d_start
+            _end = self.n_clusters_2d_end
+            n_clusters = _start + ((_end - _start) / self.epochs) * inner_step
+            graph_2d_cluster_single_image(graph, n_clusters, 0.01, 'grid')
 
             num_per_cluster = max(1, math.ceil(n_samples / len(graph.cluster_set[0])))
             rough_idx = sample_random_node_indices_per_cluster(
                 graph, cluster_dim='2d', num_per_cluster=num_per_cluster
                 )
+            
+            # rough_idx  sample from 2d grid, randomly sample one from each dim, and then combine
+            
+            
             space_emb = graph.space_emb[rough_idx].to(self.device)  # [N_rough, D]
             feats = graph.feat[rough_idx].to(self.device)  # [N_rough, F]
             with torch.no_grad():
@@ -879,7 +915,7 @@ class EVOSSampler:
         # print("===in reconstruct===\n" + str(data))
         img = data.reshape(self.H, self.W, self.C).permute(2, 0, 1)  # c,h,w
         # print("===pre decode img===\n" + str(img))
-        img = self._decode_img(img)
+        # img = self._decode_img(img)
         # print("===post decode img===\n" + str(img))
         return img
 
@@ -909,7 +945,7 @@ class EVOSSampler:
 
     def _get_data(self):
         img = self.input_img
-        img = self._encode_img(img)
+        # img = self._encode_img(img)
         gt = img.permute(1, 2, 0).reshape(-1, self.C)  # h*w, C
         coords = torch.stack(
             torch.meshgrid(
@@ -930,6 +966,8 @@ class EVOSSampler:
         # Get coords function
         # Return the output in Data() structure to fit inr_sampling pipeline
         coords, gt, sel_mask = self._sampler_get_coords_gt(epoch, graph)
+        
+        
 
         if sel_mask != None:
             graph = Data(
@@ -951,3 +989,72 @@ class EVOSSampler:
             )
 
         return graph
+    
+    
+# grid sampler functions
+
+class GridSampler(InrSamplerWrapper):
+    pass
+    
+def sample_multiple_from_intervals(bounds, n_samples, device='cuda'):
+    """
+    Sample multiple integers from each interval.
+    
+    Args:
+        bounds: tensor of shape (n_intervals, 2)
+        n_samples: number of samples per interval
+        device: device to run on
+    
+    Returns:
+        tensor of shape (n_intervals, n_samples)
+    """
+    bounds = bounds.to(device)
+    n_intervals = len(bounds)
+    
+    # Expand bounds for vectorized sampling
+    low = bounds[:, 0].unsqueeze(1).expand(n_intervals, n_samples)
+    high = bounds[:, 1].unsqueeze(1).expand(n_intervals, n_samples)
+    
+    rand_vals = torch.rand(n_intervals, n_samples, device=device)
+    samples = low + torch.floor(rand_vals * (high - low + 1)).long()
+    
+    return samples
+
+def generate_equal_bins(low, high, n_bins, device='cuda'):
+    """
+    Generate bin bounds with similar widths (max difference = 1).
+    
+    Args:
+        low: lower bound of the range
+        high: upper bound of the range (inclusive)
+        n_bins: number of bins to create
+        device: device to run on
+    
+    Returns:
+        tensor of shape (n_bins, 2) containing [start, end] for each bin
+    """
+    device = torch.device(device)
+    
+    # Total range (inclusive)
+    total_range = high - low + 1
+    
+    # Base width for each bin
+    base_width = total_range // n_bins
+    
+    # Number of bins that need one extra element
+    remainder = total_range % n_bins
+    
+    # Create bin bounds
+    bounds = torch.zeros(n_bins, 2, dtype=torch.long, device=device)
+    
+    current_pos = low
+    for i in range(n_bins):
+        # First 'remainder' bins get base_width + 1, others get base_width
+        width = base_width + (1 if i < remainder else 0)
+        
+        bounds[i, 0] = current_pos  # start of bin
+        bounds[i, 1] = current_pos + width - 1  # end of bin (inclusive)
+        
+        current_pos += width
+    
+    return bounds

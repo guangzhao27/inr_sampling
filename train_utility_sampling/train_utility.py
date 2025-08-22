@@ -5,7 +5,7 @@ from .metalearning_sampling import graph_outer_step as outer_step
 from .metalearning_sampling import graph_inner_loop, single_image_step
 from torch.nn.parallel import DistributedDataParallel as DDP
 import numpy as np
-
+from time import time
 def divide_array_indexes(N, k):
     # Base size and extra elements
     base_size = N // k
@@ -281,14 +281,14 @@ def train_step_single_image(step, graph, inr, device,
         graph, 
         iter=step,
         is_train=True,
-        return_reconstructions=True,
+        return_reconstructions=False,
         use_rel_loss=use_rel_loss,
         sampler=sampler, 
         cfg=cfg,
-        optimizer=optimizer,
     )
     
-    recon = outputs['reconstructions']
+    # t0 = time()
+    # recon = outputs['reconstructions']
 
     optimizer.zero_grad()
     loss = outputs['loss']
@@ -301,6 +301,7 @@ def train_step_single_image(step, graph, inr, device,
     optimizer.step()
     
     train_loss = outputs['loss'].cpu().detach().item()
+    
     if use_rel_loss:
         rel_train_loss = outputs['rel_loss'].cpu().detach().item()
     else:
@@ -308,6 +309,7 @@ def train_step_single_image(step, graph, inr, device,
     
     psnr_score = 0
     ssim_score = 0
+    # print('train step time:', time() - t0)
         
     return train_loss, rel_train_loss, grad_norm
 
@@ -338,10 +340,10 @@ def validation_step_single_image(step, graph, inr, device,
     else:
         rel_val_loss = None
     
-    psnr_score = 0
-    ssim_score = 0
+    psnr_score = outputs['psnr']
+    ssim_score = outputs['ssim']
         
-    return val_loss, rel_val_loss
+    return val_loss, rel_val_loss, psnr_score, ssim_score
 
 def get_grad_norm(model):
     grads = []

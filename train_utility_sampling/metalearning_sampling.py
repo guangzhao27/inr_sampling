@@ -11,6 +11,66 @@ import matplotlib.colors as mcolors
 from omegaconf import DictConfig, OmegaConf
 import torch.nn.functional as F
 import os
+from time import time
+
+from skimage.metrics import structural_similarity as ssim
+
+def psnr(img1, img2, max_val=None):
+    """
+    Calculate PSNR between two images
+    Args:
+        img1, img2: torch tensors or numpy arrays
+        max_val: maximum possible pixel value (if None, auto-detect from data range)
+    """
+    if isinstance(img1, torch.Tensor):
+        img1 = img1.detach().cpu().numpy()
+    if isinstance(img2, torch.Tensor):
+        img2 = img2.detach().cpu().numpy()
+    
+    # Auto-detect max_val if not provided
+    if max_val is None:
+        # Calculate the full dynamic range of the data
+        data_min = min(img1.min(), img2.min())
+        data_max = max(img1.max(), img2.max())
+        max_val = data_max - data_min
+        
+        # Handle edge case where all values are the same
+        if max_val == 0:
+            max_val = 1.0  # Default fallback
+    
+    mse = np.mean((img1 - img2) ** 2)
+    if mse == 0:
+        return float('inf')
+    
+    psnr_val = 20 * np.log10(max_val / np.sqrt(mse))
+    return psnr_val
+
+def calculate_ssim(img1, img2):
+    """
+    Calculate SSIM between two images
+    Args:
+        img1, img2: torch tensors or numpy arrays
+    """
+    if isinstance(img1, torch.Tensor):
+        img1 = img1.detach().cpu().numpy()
+    if isinstance(img2, torch.Tensor):
+        img2 = img2.detach().cpu().numpy()
+    
+    # Ensure images are in the right format for SSIM
+    # If images have channel dimension, we need to handle it
+    if img1.ndim == 3:
+        if img1.shape[0] <= 4:  # Channel first format (C, H, W)
+            img1 = img1.transpose(1, 2, 0)
+        if img2.shape[0] <= 4:  # Channel first format (C, H, W)
+            img2 = img2.transpose(1, 2, 0)
+    
+    # For grayscale images
+    if img1.ndim == 2:
+        return ssim(img1, img2, data_range=img1.max() - img1.min())
+    # For color images
+    else:
+        return ssim(img1, img2, data_range=img1.max() - img1.min(), channel_axis=2)
+
 
 def get_grad_norm(model):
     grads = []
@@ -355,15 +415,16 @@ def single_image_step(
     use_rel_loss=False,
     sampler=None, 
     cfg=None,
-    optimizer=None
 ):
     step = iter
+
+    # t0 = time()
     if sampler is not None:
         if cfg is not None and cfg.sampling.type == "EVOS":
             graph = sampler.sample(graph_ori, step)
         else:
             graph = sampler.sample(
-                inner_step=0, 
+                inner_step=step, 
                 graph=graph_ori, 
                 save_image=False
             )
@@ -371,46 +432,49 @@ def single_image_step(
         graph = graph_ori
     features = graph.feat
     coords = graph.space_emb
-    features_recon = inr(coords)
-
-    # print("---graph---\n" + str(graph) + "\n ---features---\n" + str(features) + "\n ---coords---\n" + str(coords) + "\n ---recon---\n" + str(features_recon))
-
-       
-
-
-    # print("---FR---")
-    # print(features_recon)
-    # print("---PPL---")
+    if not is_train:
+        with torch.no_grad():
+            features_recon = inr(coords)
+    else:
+        features_recon = inr(coords)
     
     if is_train and cfg.sampling.type == "EVOS":
         # print("===p recon===\n" + str(features_recon) + "\n===p features ===\n" + str(features) + "\n===step===\n" + str(step))
         # loss = sampler._sampler_compute_loss(features_recon, features, step)
-        sampler._sampler_compute_loss(features_recon, features, step)
-    # else:
+        loss = sampler._sampler_compute_loss(features_recon, features, step)
+    else:
         # loss = ((features_recon - graph.feat)**2).mean()
         # if not is_train:
             # print("---features recon---\n" + str(features_recon.shape))
             # print("---gt features---\n" + str(graph.feat.shape))
-    loss = F.mse_loss(features_recon, graph.feat)
+        loss = F.mse_loss(features_recon, graph.feat)
 
-    # if iter % 100 == 0 and cfg is not None and optimizer is not None:
-    #     per_pix_losses = ((features_recon - graph.feat)**2)
-    # #     pix_norms, pix_grads = grad_norm_per_pixel(inr, per_pix_losses, optimizer)
-    #     # grad_norm_pixel_image(pix_norms, step, cfg)
-    #     # gradient_similarity(pix_norms, pix_grads, step, cfg, loss, optimizer, inr)
-    #     # print(per_pix_losses)
-    #     # print("---PLL---")
-    #     pix_losses_list = per_pix_losses.mean(dim=1).cpu().detach().tolist()
-    #     # print(pix_losses_list)
-    #     # print("---MATRIX---")
-    #     matrix = np.array(pix_losses_list).reshape(512, 512)
-    #     # print(matrix)
-    #     mse_points_image(matrix, step, cfg)
+    # Calculate PSNR and SSIM when return_reconstructions is True
+    psnr_score = None
+    ssim_score = None
+    
+    
+    if not is_train:
+        # try:
+            # Calculate PSNR and SSIM between reconstruction and ground truth
+        H = graph.cor.max().item()+1
+        features = features.view(H, H)
+        features_recon = features_recon.view(H, H)
+        psnr_score = psnr(features_recon, features)
+        
+        
+        ssim_score = calculate_ssim(features_recon, features)
+        # except Exception as e:
+        #     print(f"Error calculating PSNR/SSIM metrics: {e}")
+        #     psnr_score = 0.0
+        #     ssim_score = 0.0
 
     outputs = {
         "loss": loss,
         "reconstructions": features_recon if return_reconstructions else None,
         "rel_loss": losses.relative_rmse(features_recon, features) if use_rel_loss else None,
+        "psnr": psnr_score,
+        "ssim": ssim_score,
     }
     
     return outputs

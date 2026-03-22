@@ -423,6 +423,7 @@ def single_image_step(
         if cfg is not None and cfg.sampling.type == "EVOS":
             graph = sampler.sample(graph_ori, step)
         else:
+            # train_utility_sampling/SamplerWrapper.py#L495
             graph = sampler.sample(
                 inner_step=step, 
                 graph=graph_ori, 
@@ -443,11 +444,24 @@ def single_image_step(
         # loss = sampler._sampler_compute_loss(features_recon, features, step)
         loss = sampler._sampler_compute_loss(features_recon, features, step)
     else:
-        # loss = ((features_recon - graph.feat)**2).mean()
-        # if not is_train:
-            # print("---features recon---\n" + str(features_recon.shape))
-            # print("---gt features---\n" + str(graph.feat.shape))
-        loss = F.mse_loss(features_recon, graph.feat)
+        # if graph has weight, add graph.weight to loss calculation,
+        # use normalized weight in the loss calculation
+        if hasattr(graph, "weight") and graph.weight is not None:
+            err = features_recon - graph.feat
+            w = graph.weight
+            # Ensure device/dtype alignment; rely on broadcasting if shapes differ
+            w = w.to(err)
+            mse_num = (w * err.pow(2)).sum()
+            w_sum = w.sum()
+            # Normalize by sum of weights; fallback to unweighted MSE if degenerate
+            if torch.isfinite(w_sum) and w_sum.item() > 0:
+                loss = mse_num / w_sum / len(err)
+                print('mse num:', mse_num)
+            else:
+                loss = err.pow(2).mean()
+                print('else')
+        else:
+            loss = F.mse_loss(features_recon, graph.feat)
 
     # Calculate PSNR and SSIM when return_reconstructions is True
     psnr_score = None

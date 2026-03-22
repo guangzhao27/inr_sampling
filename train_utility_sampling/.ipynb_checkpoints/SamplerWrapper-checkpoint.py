@@ -19,7 +19,6 @@ from train_utility_sampling.taylor_estimation import (
     grad_variance_ground_truth,
     cell_grad_variance_estimate_with_norm_corrected,
     cell_grad_variance_estimate_with_jacrev,
-    loss_variance_ground_truth,
 )
 
 
@@ -552,7 +551,7 @@ class INRSingle2dSamplerWrapper(InrSamplerWrapper):
             grid = HierarchicalImageGrid(1024, 1024, initial_grid_size=32)
             evaluation_function = lambda x: cell_grad_variance_estimate_with_jacrev(x, graph, self.model, self.device)
             grid.iterative_subdivision(evaluation_function, iterations=5, percentage=11)
-            bounds, cell_size, _ = grid.get_leaf_properties_tensor()
+            bounds, cell_size = grid.get_leaf_properties_tensor()
             cell_num = bounds.shape[0]
             n_per_cell = max(1, math.ceil(n_samples / cell_num))
             cor = sample_multiple_from_2d_intervals(bounds, n_per_cell)
@@ -663,7 +662,7 @@ class INRSingle2dAdaptiveSamplerWrapper(InrSamplerWrapper):
         # Store graph reference for evaluation function
         self.cached_graph = None
     
-    def _create_evaluation_function(self, graph: Data, mode: str = 'gradient'):
+    def _create_evaluation_function(self, graph: Data):
         """
         Create evaluation function with graph context.
         Uses the new quadtree API where cells are passed directly as ImageCell objects.
@@ -697,23 +696,14 @@ class INRSingle2dAdaptiveSamplerWrapper(InrSamplerWrapper):
             cell_areas_tensor = torch.tensor(cell_areas, device=self.device, dtype=torch.float32)
             
             # Compute gradient variance for all cells at once
-            if mode == 'gradient':
-                grad_variances = cell_grad_variance_estimate_with_jacrev(
-                    cell_coords_tensor, graph, self.model, self.device
-                )
+            grad_variances = cell_grad_variance_estimate_with_jacrev(
+                cell_coords_tensor, graph, self.model, self.device
+            )
             
-                # Weight by cell area (larger cells contribute more)
-                weighted_std = grad_variances.sqrt() * cell_areas_tensor
+            # Weight by cell area (larger cells contribute more)
+            weighted_variances = grad_variances * cell_areas_tensor
             
-                return weighted_std.tolist()
-            
-            if mode == 'loss':
-                loss_variance = loss_variance_ground_truth(
-                    cell_coords_tensor, graph, self.model, self.device
-                )
-                
-                cell_value = loss_variance.sqrt() * cell_areas_tensor
-                return cell_value.tolist()
+            return weighted_variances.tolist()
         
         return evaluate_cells
     def sample(
@@ -721,7 +711,6 @@ class INRSingle2dAdaptiveSamplerWrapper(InrSamplerWrapper):
         inner_step: int,
         graph: Data,
         save_image: bool = False,
-        mode: str = 'loss',
         ) -> Data:
         """
         Adaptive sampling: decide cell sizes based on gradient variance estimation,
@@ -740,10 +729,10 @@ class INRSingle2dAdaptiveSamplerWrapper(InrSamplerWrapper):
         
         # Create adaptive grid with gradient-based subdivision
         
-        grid = HierarchicalImageGrid(self.image_width, self.image_width, initial_grid_size=16)
+        grid = HierarchicalImageGrid(self.image_width, self.image_width, initial_grid_size=32)
         
         # Create evaluation function with graph context
-        eval_fn = self._create_evaluation_function(graph, mode=mode)
+        eval_fn = self._create_evaluation_function(graph)
         
         # Perform adaptive subdivision based on gradient variance
         grid.iterative_subdivision(
@@ -754,32 +743,30 @@ class INRSingle2dAdaptiveSamplerWrapper(InrSamplerWrapper):
         )
         
         # Get cell boundaries and sample from each cell
-        bounds, cell_sizes, values = grid.get_leaf_properties_tensor(evaluation_function=eval_fn, device=self.device)
-        
-        counts = sample_counts_poisson(values, expected_total=n_samples)
+        bounds, cell_sizes = grid.get_leaf_properties_tensor(device=self.device)
         n_cells = bounds.shape[0]
         n_per_cell = max(1, int(np.ceil(n_samples / n_cells)))
         
         # Sample coordinates from cells (bounds are now inclusive)
-        samples_xy, cell_ids, ptr = sample_variable_from_2d_intervals_vcounts(bounds, counts, device=self.device)
+        sampled_coords = sample_multiple_from_2d_intervals(bounds, n_per_cell, cell_sizes=None)
         
-        # Convert (x,y) -> flat index
-        x_coords = samples_xy[:, 0]  # (total_samples,)
-        y_coords = samples_xy[:, 1]  # (total_samples,)
-        sampled_idx = y_coords * self.image_width + x_coords  # (total_samples,)
-
-        # Create per-sample weights:
-        # Weight per sample in cell i: cell_area / n_samples_from_cell_i
-        # Here cell_area = cell_sizes[i], n_samples_from_cell_i = counts[i]
-        # Use gather via cell_ids
-        counts_f = counts.to(torch.float32)
-        cell_sizes_f = cell_sizes.to(torch.float32)
-
-        # Avoid division by zero (even though samples only exist where counts>0, this is safer)
-        per_cell_weight = cell_sizes_f / values  
-        # proportional weights, values is the cell probability, cell_sizes_f is the cell area
-        per_cell_weight = per_cell_weight / torch.sum(per_cell_weight) / n_samples
-        sampled_weights = per_cell_weight[cell_ids]         # (total_samples,)
+        # Convert to flat indices
+        x_coords = sampled_coords[:, :, 0]  # (n_cells, n_per_cell)
+        y_coords = sampled_coords[:, :, 1]  # (n_cells, n_per_cell)
+        flat_indices = (y_coords * self.image_width + x_coords).flatten()  # (n_cells * n_per_cell,)
+        
+        # Create weights: larger cells get higher weight per sample
+        # Weight = cell_area / n_samples_from_cell
+        # This ensures that samples from larger cells contribute proportionally more
+        cell_weights = cell_sizes / n_per_cell  # (n_cells,)
+        sample_weights = cell_weights.unsqueeze(1).expand(-1, n_per_cell).flatten()  # (n_cells * n_per_cell,)
+        
+        # Randomly select final n_samples
+        n_samples = min(n_samples, len(flat_indices))
+        perm = torch.randperm(len(flat_indices), device=self.device)[:n_samples]
+        sampled_idx = flat_indices[perm]
+        sampled_weights = sample_weights[perm]
+        
         graph.to(self.device)
         sampled_graph = Data(
             cor=graph.cor[sampled_idx],
@@ -1186,27 +1173,7 @@ class EVOSSampler:
         return graph
     
 
-@torch.no_grad()
-def sample_counts_poisson(values: torch.Tensor, expected_total: float, eps: float = 1e-12) -> torch.Tensor:
-    """
-    values: [N] >= 0
-    """
-    if values.dim() != 1:
-        raise ValueError("values must be 1D [N].")
-    if expected_total < 0:
-        raise ValueError("expected_total must be >= 0.")
-
-    v = values.clamp_min(0)
-    s = v.sum()
-    if s <= eps:
-        return torch.zeros_like(v, dtype=torch.long)
-
-    lam = (expected_total * v) / s  # [N]
-    counts = torch.poisson(lam)     # float tensor, integer-valued
-    return counts.to(torch.long)
-
-
-def sample_multiple_from_2d_intervals(bounds, n_samples, device='cuda'):
+def sample_multiple_from_2d_intervals(bounds, n_samples, cell_sizes=None, device='cuda'):
     """
     Sample multiple 2D coordinate pairs from each 2D interval.
     Optimized for large n_samples.
@@ -1239,77 +1206,6 @@ def sample_multiple_from_2d_intervals(bounds, n_samples, device='cuda'):
     samples = torch.stack([x_samples, y_samples], dim=2).long()
     
     return samples
-
-
-@torch.no_grad()
-def sample_variable_from_2d_intervals_vcounts(bounds: torch.Tensor,
-                                      counts: torch.Tensor,
-                                      device: str = "cuda"):
-    """
-    Variable number of integer (x, y) samples per cell, sampled uniformly from inclusive 2D box bounds.
-
-    Args:
-        bounds: (n_cells, 4) each row [x_low, x_high, y_low, y_high] (integer-like)
-        counts: (n_cells,) number of samples for each cell (int/long), can be zero
-        device: 'cuda' or 'cpu'
-
-    Returns:
-        samples: (total_samples, 2) long tensor, packed samples
-        cell_ids: (total_samples,) long tensor, indicates which cell each sample belongs to
-        ptr: (n_cells+1,) long tensor, ptr[i]: start index of cell i in samples, ptr[i+1] end
-             So samples[ptr[i]:ptr[i+1]] are samples from cell i.
-    """
-    bounds = bounds.to(device)
-    counts = counts.to(device=device, dtype=torch.long)
-
-    if bounds.dim() != 2 or bounds.size(1) != 4:
-        raise ValueError("bounds must have shape (n_cells, 4).")
-    if counts.dim() != 1 or counts.numel() != bounds.size(0):
-        raise ValueError("counts must have shape (n_cells,).")
-    if (counts < 0).any():
-        raise ValueError("counts must be >= 0.")
-
-    n_cells = bounds.size(0)
-    total = int(counts.sum().item())
-
-    # ptr for slicing back per cell
-    ptr = torch.zeros(n_cells + 1, device=device, dtype=torch.long)
-    if n_cells > 0:
-        ptr[1:] = torch.cumsum(counts, dim=0)
-
-    if total == 0:
-        samples = torch.empty((0, 2), device=device, dtype=torch.long)
-        cell_ids = torch.empty((0,), device=device, dtype=torch.long)
-        return samples, cell_ids, ptr
-
-    # Build cell_ids without Python loops
-    cell_ids = torch.repeat_interleave(torch.arange(n_cells, device=device, dtype=torch.long), counts)
-
-    # Precompute ranges (inclusive)
-    x_low = bounds[:, 0].to(torch.long)
-    x_high = bounds[:, 1].to(torch.long)
-    y_low = bounds[:, 2].to(torch.long)
-    y_high = bounds[:, 3].to(torch.long)
-
-    x_range = (x_high - x_low + 1).clamp_min(1)  # avoid non-positive
-    y_range = (y_high - y_low + 1).clamp_min(1)
-
-    # Gather per-sample lows and ranges
-    x_low_s = x_low[cell_ids]
-    y_low_s = y_low[cell_ids]
-    x_rng_s = x_range[cell_ids]
-    y_rng_s = y_range[cell_ids]
-
-    # Randoms in [0,1)
-    r = torch.rand((total, 2), device=device, dtype=torch.float32)
-
-    # Integer uniform in inclusive box
-    x = x_low_s + torch.floor(r[:, 0] * x_rng_s.to(torch.float32)).to(torch.long)
-    y = y_low_s + torch.floor(r[:, 1] * y_rng_s.to(torch.float32)).to(torch.long)
-
-    samples = torch.stack((x, y), dim=1)
-    return samples, cell_ids, ptr
-
 
 def generate_equal_bins(low, high, n_bins, device='cuda'):
     """

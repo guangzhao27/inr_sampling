@@ -12,16 +12,16 @@ from argparse import ArgumentParser
 from functools import partial
 # import apebench
 
-# from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader
 
 import torch.nn as nn
-
-from torch_geometric.data import Dataset, Data
-from torch_geometric.loader import DataLoader
-from torch_geometric.data import Batch
+# from torch_geometric.data import Dataset, Data
+# from torch_geometric.loader import DataLoader
+# from torch_geometric.data import Batch
 from mmap_ninja import RaggedMmap
 from time import time
 from collections import defaultdict
+from .MyTorchgeo import Data, Batch
 
 # def creat_dataset(train_num, val_num, test_num, train_p_list, val_p_list, test_p_list)
 
@@ -676,7 +676,7 @@ class GraphNavierStokes(Dataset):
 
         return spatial_embedding
 
-    def len(self):
+    def __len__(self):
         return len(self.dataset)
     
     def __getitem__(self, key):
@@ -722,7 +722,7 @@ class GraphNavierStokesSampling(GraphNavierStokes):
             # use_mmap = True
         ):
         
-        super(GraphNavierStokes, self).__init__()
+        super(Dataset, self).__init__()
         
         # self.path = datapath
         # self.splits = splits

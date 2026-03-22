@@ -1,11 +1,11 @@
 #!/bin/bash
 #SBATCH --qos=regular
-#SBATCH --time=1:00:00
+#SBATCH --time=4:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --constraint=gpu
 #SBATCH --gpus-per-node=1
-#SBATCH --account=m2956_g
+#SBATCH --account=m4259_g
 
 w0=30
 sampling_rate=0.001
@@ -22,10 +22,10 @@ cd /pscratch/sd/g/gzhao27/INR/SOMA/
 source ~/anaconda3/etc/profile.d/conda.sh
 conda activate torchgeo
 
-# null NMT random 2d_cluster_slic 2d_cluster_grid EVOS
-for time_frame in 100 120 140 160 180 200; do
-  for sample_type in random; do
-    run_name="NS1024_single_${sample_type}_${sampling_rate}_lr_${lr}_depth_${depth}_end_${n_finish}_t${time_frame}new"
+# null NMT random 2d_grid_linear EVOS 2d_grid_adaptive.    2d_cluster_slic
+for time_frame in 100; do
+  for sample_type in 2d_grid_adaptive; do
+    run_name="NS1024_single_${sample_type}_${sampling_rate}_lr_${lr}_depth_${depth}_end_${n_finish}_t${time_frame}vcount_lossfix"
 
     python /pscratch/sd/g/gzhao27/INR/INR_SAMPLE/inr_sample/single_image_inr.py \
         data.dataset_name=NS \

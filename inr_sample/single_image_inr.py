@@ -34,7 +34,7 @@ from train_utility_sampling.train_utility import (
     train_step_single_image,
     validation_step_single_image,
 )
-from train_utility_sampling.SamplerWrapper import INRSingle2dSamplerWrapper, add_cluster_label, graph_2d_cluster_single_image, EVOSSampler
+from train_utility_sampling.SamplerWrapper import INRSingle2dSamplerWrapper, add_cluster_label, graph_2d_cluster_single_image, EVOSSampler, create_inr_sampler
 from utils.data.load_data import set_seed
 from utils.load_inr import create_inr_instance, load_inr_model
 from datetime import datetime
@@ -90,53 +90,53 @@ def initialize_wandb(cfg):
 #     plt.savefig(save_path)
 #     plt.close()
 
-def create_inr_sampler(cfg, inr, graph, current_date_str, run_name, device='cuda'):
-    """
-    Build and return an INRSingle2dSamplerWrapper or EVOSSampler based on cfg.sampling 
-    settings, or None if no sampling type is specified.
-    """
-    sampling_type = cfg.sampling.type
-    image_width = graph.cor.max().item() + 1  # Set image width from space_emb shape
+# def create_inr_sampler(cfg, inr, graph, current_date_str, run_name, device='cuda'):
+#     """
+#     Build and return an INRSingle2dSamplerWrapper or EVOSSampler based on cfg.sampling 
+#     settings, or None if no sampling type is specified.
+#     """
+#     sampling_type = cfg.sampling.type
+#     image_width = graph.cor.max().item() + 1  # Set image width from space_emb shape
     
-    if sampling_type is None:
-        return None
+#     if sampling_type is None:
+#         return None
 
-    # Map special 2d_cluster types to a unified sampler_name + cluster_type
-    cluster_map = {
-        '2d_cluster_slic': 'slic',
-        '2d_cluster_grid': 'grid',
-    }
+#     # Map special 2d_cluster types to a unified sampler_name + cluster_type
+#     cluster_map = {
+#         '2d_cluster_slic': 'slic',
+#         '2d_cluster_grid': 'grid',
+#     }
 
-    if sampling_type in cluster_map:
-        sampler_name = '2d_cluster'
-        cluster_type = cluster_map[sampling_type]
-        # Run your graph clustering side-effect for a single image
-        _start = cfg.sampling.n_clusters_2d_start
-        graph_2d_cluster_single_image(graph, _start, 0.01, cluster_type)
-    elif sampling_type == "EVOS":
-        H = int(np.sqrt(len(graph.feat)))
-        img = graph.feat.reshape(H, H)
-        img = img.unsqueeze(0)
-        # print("===img for evos===\n" + str(img))
-        # print("===shape for evos===\n" + str(img.shape))
-        return EVOSSampler(cfg, img, graph)
+#     if sampling_type in cluster_map:
+#         sampler_name = '2d_cluster'
+#         cluster_type = cluster_map[sampling_type]
+#         # Run your graph clustering side-effect for a single image
+#         _start = cfg.sampling.n_clusters_2d_start
+#         graph_2d_cluster_single_image(graph, _start, 0.01, cluster_type)
+#     elif sampling_type == "EVOS":
+#         H = int(np.sqrt(len(graph.feat)))
+#         img = graph.feat.reshape(H, H)
+#         img = img.unsqueeze(0)
+#         # print("===img for evos===\n" + str(img))
+#         # print("===shape for evos===\n" + str(img.shape))
+#         return EVOSSampler(cfg, img, graph)
 
-    else:
-        sampler_name = sampling_type
+#     else:
+#         sampler_name = sampling_type
 
-    save_path = f'./sampled_frames/{current_date_str + run_name}'
-    return INRSingle2dSamplerWrapper(
-        model=inr,
-        iters=0,
-        device=device,
-        sample_rate=cfg.sampling.rate,
-        sample_type=sampler_name,
-        save_samples_path=save_path,
-        n_clusters_2d_start=cfg.sampling.n_clusters_2d_start,
-        n_clusters_2d_end=cfg.sampling.n_clusters_2d_end,
-        epochs = cfg.optim.epochs,
-        image_width = image_width
-    )
+#     save_path = f'./sampled_frames/{current_date_str + run_name}'
+#     return INRSingle2dSamplerWrapper(
+#         model=inr,
+#         iters=0,
+#         device=device,
+#         sample_rate=cfg.sampling.rate,
+#         sample_type=sampler_name,
+#         save_samples_path=save_path,
+#         n_clusters_2d_start=cfg.sampling.n_clusters_2d_start,
+#         n_clusters_2d_end=cfg.sampling.n_clusters_2d_end,
+#         epochs = cfg.optim.epochs,
+#         image_width = image_width
+#     )
 
 @hydra.main(config_path="../config/", config_name="inr_sample.yaml")
 def main(cfg: DictConfig) -> None:
@@ -301,39 +301,11 @@ def main(cfg: DictConfig) -> None:
         cfg = checkpoint['cfg']
         print("epoch_start, alpha, best_loss", epoch_start, alpha.item(), best_loss)
 
-    # if cfg.wandb.use_wandb:
-    #     wandb.log({"results_dir": str(RESULTS_DIR)}, step=epoch_start, commit=False)
-    
-    # if cfg.sampling.type in ['3d_cluster']:
-    #     cluster_dim = '2d'
-    #     add_cluster_label(train_loader, 1000, 0.01, cluster_dim=cluster_dim)
-    #     add_cluster_label(val_loader, 1000, 0.01, cluster_dim=cluster_dim)
-    
-    # graph = Data(
-    #     cor=graph.cor[indices_t],
-    #     feat=graph.feat[indices_t],
-    #     time=torch.full((len(indices_t),), 995, dtype=torch.long),  # actual time
-    #     space_emb=graph.space_emb[indices_t],
-    #     T=torch.tensor(1000),
-    # )
-
 
     ''' Begin the sampling setting '''
     inr_sampler = create_inr_sampler(cfg, inr, graph, current_date_str, run_name)
     if cfg.sampling.type == "EVOS":
         inr_sampler._evos_init()
-        
-    # for _ in range(3):  # a few steps to warm up
-    #     train_loss, rel_train_loss, grad_norm = train_step_single_image(
-    #         -1, graph, inr, 
-    #         device=device,
-    #         use_rel_loss=False,
-    #         optimizer=optimizer,
-    #         sampler=inr_sampler,
-    #         cfg = cfg
-    #         )
-
-    # torch.cuda.synchronize()  # make sure GPU ops are done
     
     # Main Training Loop
     ''' Begin the training process '''
@@ -362,12 +334,6 @@ def main(cfg: DictConfig) -> None:
         if True in (step_show, step_show_last):
             if cfg.sampling.type != None:
                 if cfg.sampling.type != "EVOS" and step % 100 == 0:
-                    # if cfg.sampling.type == "2d_cluster_grid":  # Comment this block out to remove scheduler
-                    #     print("New cluster graph made")
-                    #     _start = cfg.sampling.n_clusters_2d_start
-                    #     _end = cfg.sampling.n_clusters_2d_end
-                    #     n_clusters = _start + ((_end - _start) / epochs) * step
-                    #     graph_2d_cluster_single_image(graph_ori, n_clusters, 0.01, 'grid')
                     inr_sampler.sample(
                         inner_step=step, 
                         graph=graph, 

@@ -20,13 +20,15 @@ os.environ["RESULTS_DIR"] = ''
 import wandb
 from omegaconf import DictConfig, OmegaConf
 from utils.data.unstructure_dataset import (
-    GraphNavierStokes, 
-    collate_graph_inr, 
-    create_burgers_dataset, 
+    GraphNavierStokes,
+    collate_graph_inr,
+    create_burgers_dataset,
+    create_burgers2d_dataset,
+    create_piecewise_dataset,
     create_soma_dataset,
     get_graph_t_idx,
     create_ns_dataset,
-    )
+)
 from train_utility_sampling.train_utility import (
     train_step, 
     validation_step,
@@ -104,7 +106,7 @@ def create_inr_sampler(cfg, inr, graph, current_date_str, run_name, device='cuda
     # Map special 2d_cluster types to a unified sampler_name + cluster_type
     cluster_map = {
         '2d_cluster_slic': 'slic',
-        '2d_cluster_grid': 'grid',
+        '2d_grid_linear': 'grid',
     }
 
     if sampling_type in cluster_map:
@@ -163,6 +165,7 @@ def main(cfg: DictConfig) -> None:
 
     #wandb
     run_name = cfg.wandb.name
+    run_name_str = run_name if run_name else "unnamed"
 
     #data
     data_path = cfg.data.data_path
@@ -231,6 +234,23 @@ def main(cfg: DictConfig) -> None:
         output_dim = 1
         trainset, valset, testset, p_mean, p_std = create_burgers_dataset()
         feat_transform, feat_inv_transform = None, None
+    elif dataset_name == "Burgers2D":
+        input_dim = 2
+        output_dim = 1
+        trainset, valset, testset, p_mean, p_std = create_burgers2d_dataset(
+            data_dir=data_path,
+        )
+        feat_transform, feat_inv_transform = None, None
+    elif dataset_name == "Piecewise2D":
+        input_dim = 2
+        output_dim = 1
+        trainset = create_piecewise_dataset(
+            resolution=cfg.data.piecewise_resolution,
+            alpha=cfg.data.piecewise_alpha,
+            beta=cfg.data.piecewise_beta,
+            eps=cfg.data.piecewise_eps if cfg.data.piecewise_eps else None,
+        )
+        feat_transform, feat_inv_transform = None, None
     else:
         raise NotImplementedError(f"The dataset ${dataset_name} does not have a corresponding class.")
 
@@ -241,6 +261,9 @@ def main(cfg: DictConfig) -> None:
     # print("len train_loader:\n", str(len(train_loader)))
     graph = next(iter(train_loader))
     t = cfg.data.single_time_frame  # Use this to time frame
+    # Piecewise2D is a single-frame dataset (time is always 0); ignore single_time_frame
+    if dataset_name == "Piecewise2D":
+        t = 0
     indices_t = get_graph_t_idx(graph, t)
 
     graph = Data(
@@ -362,7 +385,7 @@ def main(cfg: DictConfig) -> None:
         if True in (step_show, step_show_last):
             if cfg.sampling.type != None:
                 if cfg.sampling.type != "EVOS" and step % 100 == 0:
-                    # if cfg.sampling.type == "2d_cluster_grid":  # Comment this block out to remove scheduler
+                    # if cfg.sampling.type == "2d_grid_linear":  # Comment this block out to remove scheduler
                     #     print("New cluster graph made")
                     #     _start = cfg.sampling.n_clusters_2d_start
                     #     _end = cfg.sampling.n_clusters_2d_end
@@ -416,29 +439,77 @@ def main(cfg: DictConfig) -> None:
             if loss_to_check < best_loss:
                 best_loss = loss_to_check
 
-                dir_path = f'/pscratch/sd/g/gzhao27/INR/SOMA/results/inr_sampling/{current_date_str+run_name}'
+                dir_path = f'/pscratch/sd/g/gzhao27/INR/INR_SAMPLE/Results/checkpoints/{current_date_str+run_name_str}'
                 if not os.path.exists(dir_path):
                     os.makedirs(dir_path)
                 savepath = f'{dir_path}/{step}.pt'
-                # print('savepath:', savepath)
-                torch.save(
-                    {
-                        "cfg": cfg,
-                        "epoch": step,
-                        "inr": inr.state_dict(),
-                        "optimizer_inr": optimizer.state_dict(),
-                        "loss": best_loss,
-                        "alpha": alpha,
-                        "feat_transform": feat_transform,
-                        "feat_inv_transform": feat_inv_transform, 
-                        # "grid_tr": grid_tr,
-                        # "grid_te": grid_te,
-                    },
-                    savepath,
+
+                # Build graph snapshot (CPU) for visualization
+                _graph_data = {
+                    "cor": graph_ori.cor.detach().cpu(),
+                    "space_emb": graph_ori.space_emb.detach().cpu(),
+                    "feat": graph_ori.feat.detach().cpu(),
+                    "time": graph_ori.time.detach().cpu(),
+                }
+
+                _ckpt = {
+                    "cfg": cfg,
+                    "epoch": step,
+                    "inr": inr.state_dict(),
+                    "optimizer_inr": optimizer.state_dict(),
+                    "loss": best_loss,
+                    "alpha": alpha,
+                    "feat_transform": feat_transform,
+                    "feat_inv_transform": feat_inv_transform,
+                    "input_dim": input_dim,
+                    "output_dim": output_dim,
+                    "graph_data": _graph_data,
+                }
+                torch.save(_ckpt, savepath)
+
+                # Also save best checkpoint to a local, predictable path
+                _local_ckpt_dir = './checkpoints'
+                os.makedirs(_local_ckpt_dir, exist_ok=True)
+                _local_ckpt_path = os.path.join(
+                    _local_ckpt_dir,
+                    f'{current_date_str}_{run_name_str}_best.pt'
                 )
+                torch.save(_ckpt, _local_ckpt_path)
+                print(f'[Checkpoint] Best model (step {step}, loss {best_loss:.6f}) saved to: {_local_ckpt_path}')
     
     log.end_timer("final")
     print("TIME:", total_train_time)
+
+    # Save final checkpoint after training completes
+    _graph_data_final = {
+        "cor": graph_ori.cor.detach().cpu(),
+        "space_emb": graph_ori.space_emb.detach().cpu(),
+        "feat": graph_ori.feat.detach().cpu(),
+        "time": graph_ori.time.detach().cpu(),
+    }
+    _final_ckpt_dir = './checkpoints'
+    os.makedirs(_final_ckpt_dir, exist_ok=True)
+    _final_ckpt_path = os.path.join(
+        _final_ckpt_dir,
+        f'{current_date_str}_{run_name_str}_final.pt'
+    )
+    torch.save(
+        {
+            "cfg": cfg,
+            "epoch": epochs - 1,
+            "inr": inr.state_dict(),
+            "optimizer_inr": optimizer.state_dict(),
+            "loss": best_loss,
+            "alpha": alpha,
+            "feat_transform": feat_transform,
+            "feat_inv_transform": feat_inv_transform,
+            "input_dim": input_dim,
+            "output_dim": output_dim,
+            "graph_data": _graph_data_final,
+        },
+        _final_ckpt_path,
+    )
+    print(f'[Checkpoint] Final model saved to: {_final_ckpt_path}')
 
     # Output stats to file
     # with open('/sdcc/u/smccue/projects/inr_sampling/visuals/out.txt', 'a') as f:

@@ -25,16 +25,18 @@ re=10000
 cd /pscratch/sd/g/gzhao27/INR/SOMA/
 source ~/anaconda3/etc/profile.d/conda.sh
 conda activate torchgeo
+dataset_name=Piecewise2D
+# dataset name choices: Piecewise2D, NS2d, NS2d_inhom, NS2d_incom, NS2d_incom_inhom
 
 # null NMT random 2d_cluster_slic 2d_grid_linear EVOS
 # for time_frame in 100 120 140 160 180 200; do
 #   for sample_type in NMT random 2d_grid_linear EVOS; do
 for time_frame in 100; do
   for sample_type in null NMT random 2d_grid_linear EVOS; do
-    run_name="NS1024_single_${sample_type}_re_${re}_sampling_${sampling_rate}_lr_${lr}_depth_${depth}_t${time_frame}"
+    run_name="NS1024_single_${sample_type}_dataset_${dataset_name}_sampling_${sampling_rate}_lr_${lr}_depth_${depth}_t${time_frame}"
 
     python /pscratch/sd/g/gzhao27/INR/INR_SAMPLE/inr_sample/single_image_inr.py \
-        data.dataset_name=NS \
+        data.dataset_name=$dataset_name \
         inr.model_type=siren \
         data.space_factor=1 \
         optim.batch_size=2 \
@@ -58,7 +60,6 @@ for time_frame in 100; do
         sampling.n_clusters_2d_end=$n_finish \
         sampling.n_clusters_2d_start=$n_start \
         "data.split_ratios=[${train_ratio}, 0.01, 0.01]" \
-        data.data_path=/pscratch/sd/g/gzhao27/INR/data/NS2d/ns_data_res2048_re${re}_7.npy\
         data.data_type=other \
         data.single_time_frame=${time_frame}
   done

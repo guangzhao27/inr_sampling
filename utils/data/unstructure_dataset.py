@@ -576,10 +576,170 @@ class GraphBurgers(Dataset):
     
     def __getitem__(self, key):
         graph = self.dataset[f"{key}"]
-        
-        return graph
-        
 
+        return graph
+
+
+
+class GraphBurgers2D(Dataset):
+    """
+    2D viscous Burgers equation dataset.
+
+    Loads from HDF5 files produced by `utils/data/generate_burgers2d.py`.
+
+    HDF5 layout (one file per viscosity nu):
+        tensor       : float32 (N, T, H, W)  -- scalar field u(x,y,t)
+        t-coordinate : float32 (T,)
+        x-coordinate : float32 (H,)
+        y-coordinate : float32 (W,)
+
+    The graph data contract follows GraphBurgers (1D) closely:
+        cor       : (N_pts, 2)  -- integer (i, j) grid indices
+        space_emb : (N_pts, 2)  -- normalized coords in [-1, 1]^2
+        feat      : (N_pts, 1)  -- scalar field values
+        time      : (N_pts,)    -- integer time index
+        T         : scalar      -- total time frames in this sample
+        latent_vector : (T, latent_dim)
+        pde_parameter : scalar  -- viscosity (normalized via p_transform)
+    """
+
+    def __init__(
+        self,
+        datapath_dict: dict,
+        latent_dim: int,
+        missing_rate: float,
+        space_factor: int = 1,
+        time_factor: int = 1,
+        p_transform=None,
+    ):
+        super().__init__()
+
+        self.missing_rate = missing_rate
+        self.latent_dim = latent_dim
+        self.space_factor = space_factor
+        self.time_factor = time_factor
+        self.p_transform = p_transform
+
+        dataset = {}
+        i = 0
+
+        for datapath, (index_list, p) in datapath_dict.items():
+            with h5py.File(datapath, "r") as f:
+                tensor = torch.from_numpy(
+                    f["tensor"][index_list, ::time_factor, ::space_factor, ::space_factor]
+                ).float()  # (N_sub, T, H, W)
+                tc = torch.from_numpy(f["t-coordinate"][::time_factor]).float()
+
+            N_sub, T, H, W = tensor.shape
+
+            # Normalized spatial embedding grid: (H, W, 2)
+            xs = 2.0 * torch.arange(H, dtype=torch.float32) / max(H - 1, 1) - 1.0
+            ys = 2.0 * torch.arange(W, dtype=torch.float32) / max(W - 1, 1) - 1.0
+            grid_x, grid_y = torch.meshgrid(xs, ys, indexing="ij")
+            spatial_grid = torch.stack([grid_x, grid_y], dim=-1)  # (H, W, 2)
+
+            if self.missing_rate > 0:
+                mask = torch.rand(tensor.shape) > self.missing_rate
+            else:
+                mask = torch.ones(tensor.shape, dtype=torch.bool)
+
+            pde_param_val = torch.tensor(p)
+            if self.p_transform is not None:
+                pde_param_val = self.p_transform(pde_param_val)
+
+            for n in range(N_sub):
+                cor_list, feat_list, time_list, se_list = [], [], [], []
+
+                for t in range(T):
+                    tmpmask = mask[n, t]                        # (H, W)
+                    tmptensor = tensor[n, t]                    # (H, W)
+                    cor = tmpmask.nonzero(as_tuple=False)       # (K, 2)
+                    se = spatial_grid[cor[:, 0], cor[:, 1]]     # (K, 2)
+                    cor_list.append(cor)
+                    feat_list.append(tmptensor[tmpmask].reshape(-1, 1))
+                    time_list.append(
+                        torch.full((len(cor),), t, dtype=torch.int)
+                    )
+                    se_list.append(se)
+
+                datapoint = Data(
+                    cor=torch.cat(cor_list, dim=0),
+                    feat=torch.cat(feat_list, dim=0),
+                    time=torch.cat(time_list, dim=0),
+                    space_emb=torch.cat(se_list, dim=0),
+                    T=torch.tensor(T),
+                    latent_vector=torch.zeros(T, self.latent_dim),
+                    pde_parameter=pde_param_val,
+                )
+                dataset[f"{i}"] = datapoint
+                i += 1
+
+        self.dataset = dataset
+
+    def __len__(self) -> int:
+        return len(self.dataset)
+
+    def __getitem__(self, key):
+        return self.dataset[f"{key}"]
+
+
+def create_burgers2d_dataset(
+    missing_rate: float = 0.5,
+    space_factor: int = 1,
+    time_factor: int = 1,
+    train_num: int = 100,
+    data_dir: str = "/pscratch/sd/g/gzhao27/INR/data",
+    latent_dim: int = 128,
+):
+    """
+    Build train / val / test GraphBurgers2D datasets.
+
+    Viscosity splits (mirror the 1-D Burgers convention):
+        train : nu = 0.001, 0.002, 0.005, 0.02, 0.05
+        val   : nu = 0.01   (held-out viscosity)
+        test  : nu = 0.002  (seen viscosity, held-out samples)
+
+    Data files must be pre-generated with:
+        python utils/data/generate_burgers2d.py --out_dir <data_dir>
+
+    Returns:
+        trainset, valset, testset, p_mean, p_std
+    """
+    train_p_list = (0.001, 0.002, 0.005, 0.02, 0.05)
+    val_p_list   = (0.01,)
+    test_p_list  = (0.002,)
+
+    p_mean = float(np.mean(train_p_list))
+    p_std  = float(np.std(train_p_list))
+    p_transform = lambda t: (t - p_mean) / p_std
+
+    path_fmt = os.path.join(data_dir, "2D_Burgers_Sols_Nu{}.hdf5")
+
+    valnum  = 100
+    testnum = 100
+
+    def _make_dict(p_list, start, n):
+        return {
+            path_fmt.format(p): (list(range(start, start + n)), p)
+            for p in p_list
+        }
+
+    traindict = _make_dict(train_p_list, 0,                       train_num)
+    valdict   = _make_dict(val_p_list,   train_num,                valnum)
+    testdict  = _make_dict(test_p_list,  train_num + valnum,       testnum)
+
+    common = dict(
+        latent_dim=latent_dim,
+        space_factor=space_factor,
+        time_factor=time_factor,
+        p_transform=p_transform,
+    )
+
+    trainset = GraphBurgers2D(datapath_dict=traindict, missing_rate=missing_rate, **common)
+    valset   = GraphBurgers2D(datapath_dict=valdict,   missing_rate=0.0,          **common)
+    testset  = GraphBurgers2D(datapath_dict=testdict,  missing_rate=0.0,          **common)
+
+    return trainset, valset, testset, p_mean, p_std
 
 
 class GraphNavierStokes(Dataset):
@@ -1159,6 +1319,145 @@ def create_ns_dataset(datapath, latent_dim=256, space_factor=1, split_ratios=(0.
 #     val_end = train_end + int(split_ratios[1] * total_samples)
 #     test_end = train_end+val_end +int(split_ratios[2] * total_samples)
     
+
+def piecewise_fn(
+    x: torch.Tensor,
+    y: torch.Tensor,
+    alpha: float = 10.0,
+    beta: float = 1.0,
+    eps: float = None,
+) -> torch.Tensor:
+    """
+    Analytically-defined piecewise function on [0, 1]^2:
+
+        f(x, y) = sin(2πx) + β * I(x > 0.5) * sin(2π·α·y)
+
+    The domain is split at x = 0.5: the left half contains only a smooth
+    low-frequency signal while the right half also carries a high-frequency
+    oscillation in y.  This creates a sharp spectral discontinuity that
+    challenges uniform-sampling INR baselines.
+
+    Args:
+        x, y : tensors with identical shape, values in [0, 1].
+        alpha : frequency multiplier for the high-frequency y-term.
+        beta  : amplitude of the high-frequency term.
+        eps   : if None, use a hard step indicator at x = 0.5;
+                otherwise use a smooth sigmoid with temperature eps.
+
+    Returns:
+        f : tensor with the same shape as x / y.
+    """
+    base = torch.sin(2.0 * math.pi * x)
+    indicator = (x > 0.5).float() if eps is None else torch.sigmoid((x - 0.5) / eps)
+    high_freq = torch.sin(2.0 * math.pi * alpha * y)
+    return base + beta * indicator * high_freq
+
+
+class GraphPiecewise2D(Dataset):
+    """
+    Synthetic 2D dataset based on an analytically-defined piecewise function.
+
+        f(x, y) = sin(2πx) + β * I(x > 0.5) * sin(2π·α·y)
+
+    Why on-the-fly generation is correct here (unlike Burgers 2D):
+        Evaluating a closed-form expression on a (H, W) grid is pure tensor
+        math and takes O(H·W) microseconds regardless of resolution.  There
+        is no PDE to solve, no disk I/O, and no pre-generation step needed.
+        The image is created once inside __init__ and stored in memory, just
+        as GraphNavierStokesSampling holds its data in a dict after loading.
+
+    The dataset exposes a single sample with T = 1 time frame, following the
+    single-image INR training flow.  Set data.single_time_frame = 0 in the
+    config (or omit it; the default works).
+
+    Graph contract (identical to other 2D datasets):
+        cor       : (K, 2)  -- integer (i, j) pixel indices
+        space_emb : (K, 2)  -- normalised coords in [-1, 1]^2
+        feat      : (K, 1)  -- function values f(x, y)
+        time      : (K,)    -- all-zeros (single frame)
+        T         : scalar  -- 1
+        latent_vector : (1, latent_dim)
+    """
+
+    def __init__(
+        self,
+        resolution: int = 256,
+        alpha: float = 10.0,
+        beta: float = 1.0,
+        eps: float = None,
+        latent_dim: int = 128,
+        missing_rate: float = 0.0,
+    ):
+        super().__init__()
+        H = W = resolution
+
+        # Physical coordinates in [0, 1]
+        xs = torch.linspace(0.0, 1.0, W)
+        ys = torch.linspace(0.0, 1.0, H)
+        grid_x, grid_y = torch.meshgrid(xs, ys, indexing="ij")  # (H, W)
+
+        # Evaluate piecewise function
+        image = piecewise_fn(grid_x, grid_y, alpha=alpha, beta=beta, eps=eps)  # (H, W)
+
+        # Normalised spatial embedding in [-1, 1]^2  (matches NS/Burgers2D convention)
+        se_x = 2.0 * grid_x - 1.0
+        se_y = 2.0 * grid_y - 1.0
+        spatial_grid = torch.stack([se_x, se_y], dim=-1)  # (H, W, 2)
+
+        T = 1
+        mask = (
+            torch.rand(H, W) > missing_rate
+            if missing_rate > 0
+            else torch.ones(H, W, dtype=torch.bool)
+        )
+
+        cor  = mask.nonzero(as_tuple=False)          # (K, 2)
+        se   = spatial_grid[cor[:, 0], cor[:, 1]]    # (K, 2)
+        feat = image[mask].reshape(-1, 1)             # (K, 1)
+        time = torch.zeros(len(cor), dtype=torch.int)
+
+        datapoint = Data(
+            cor=cor,
+            feat=feat,
+            time=time,
+            space_emb=se,
+            T=torch.tensor(T),
+            latent_vector=torch.zeros(T, latent_dim),
+        )
+        self.dataset = {"0": datapoint}
+
+    def __len__(self) -> int:
+        return 1
+
+    def __getitem__(self, key):
+        return self.dataset["0"]
+
+
+def create_piecewise_dataset(
+    resolution: int = 256,
+    alpha: float = 10.0,
+    beta: float = 1.0,
+    eps: float = None,
+    latent_dim: int = 128,
+) -> GraphPiecewise2D:
+    """
+    Build a GraphPiecewise2D dataset (single image, in-memory, no disk I/O).
+
+    The full dense image is stored; coordinate sub-sampling is performed by
+    the INR sampler at training time (matching the single-image flow for NS).
+
+    Returns:
+        dataset : GraphPiecewise2D — use directly as trainset.
+    """
+    return GraphPiecewise2D(
+        resolution=resolution,
+        alpha=alpha,
+        beta=beta,
+        eps=eps,
+        latent_dim=latent_dim,
+        missing_rate=0.0,
+    )
+
 
 def get_graph_t_idx(graph, t) -> torch.Tensor:
     indices_t = (graph.time == t).nonzero(as_tuple=True)[0]

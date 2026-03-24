@@ -7,3 +7,10 @@ utils/data/__pycache__/*
 *.ipynb
 *.pyc
 __pycache__/
+*.png
+*.npy
+*.log
+*.json
+*.out
+/Results/*
+/.github/*

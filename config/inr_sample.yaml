@@ -17,7 +17,18 @@ data:
   data_path: "/pscratch/sd/g/gzhao27/INR/data/NS2d/ns_mmap"
   data_type: mmap
   mmap_dir: '/pscratch/sd/g/gzhao27/INR/SOMA/results/soma_mmap_save'
-  dataset_name: "shallow-water-dino" 
+  dataset_name: "NS"
+  # Supported dataset_name values:
+  #   NS          : 2D Navier-Stokes  -- data_path to .npy / ns_mmap / hdf5
+  #   SOMA        : 3D ocean (SOMA)   -- data_path to thedataset-impliciBottomDrag.hdf5
+  #   Burgers     : 1D Burgers        -- data_path unused (hard-coded HDF5 paths)
+  #   Burgers2D   : 2D Burgers        -- data_path = directory containing
+  #                                      2D_Burgers_Sols_Nu{nu}.hdf5 files
+  #                                      (generate with: python utils/data/generate_burgers2d.py)
+  #                                      e.g. /pscratch/sd/g/gzhao27/INR/data
+  #   Piecewise2D : synthetic 2D piecewise function (in-memory, no disk needed)
+  #                 f(x,y) = sin(2πx) + beta * I(x>0.5) * sin(2π·alpha·y)
+  #                 configure with piecewise_* keys below
   data_to_encode:
   missing_rate:
   ntrain : 
@@ -33,6 +44,11 @@ data:
     - 0.15
     - 0.15
   single_time_frame: 10
+  # Piecewise2D dataset parameters (only used when dataset_name = Piecewise2D)
+  piecewise_resolution: 1024   # grid size H = W = resolution
+  piecewise_alpha: 20.0       # high-frequency multiplier in y (right half, x > 0.5)
+  piecewise_beta: 1.0         # amplitude of high-frequency term
+  piecewise_eps:  0.02        # smoothing width for step indicator; null = hard step
 
 optim:
   batch_size: 32

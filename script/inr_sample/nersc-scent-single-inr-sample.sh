@@ -12,10 +12,10 @@ source ~/anaconda3/etc/profile.d/conda.sh
 conda activate torchgeo
 
 w0=30
-sampling_rate=2e-4
+sampling_rate=1e-3
 train_ratio=1
 inner_steps=6
-lr=1e-4 # 5.6e-5 non full 
+lr=1e-3 # 5.6e-5 non full 
 depth=6
 n_start=11
 n_finish=128
@@ -29,8 +29,8 @@ conda activate torchgeo
 # null NMT random 2d_cluster_slic 2d_grid_linear EVOS
 # for time_frame in 100 120 140 160 180 200; do
 #   for sample_type in NMT random 2d_grid_linear EVOS; do
-for time_frame in 100; do
-  for sample_type in null NMT random 2d_grid_linear EVOS; do
+for time_frame in 100 120 140 160 180 200; do
+  for sample_type in NMT random 2d_grid_linear EVOS; do
     run_name="NS1024_single_${sample_type}_re_${re}_sampling_${sampling_rate}_lr_${lr}_depth_${depth}_t${time_frame}"
 
     python /pscratch/sd/g/gzhao27/INR/INR_SAMPLE/inr_sample/single_image_inr.py \
@@ -39,7 +39,7 @@ for time_frame in 100; do
         data.space_factor=1 \
         optim.batch_size=2 \
         optim.lr_inr=$lr \
-        optim.epochs=100 \
+        optim.epochs=5000 \
         optim.inner_steps=$inner_steps \
         inr.latent_dim=256 \
         inr.depth=$depth \
@@ -63,6 +63,42 @@ for time_frame in 100; do
         data.single_time_frame=${time_frame}
   done
 done
+
+# for time_frame in 100 120 140 160 180 200; do
+#   for sample_type in null; do
+#     run_name="NS1024_single_${sample_type}_re_${re}_sampling_${sampling_rate}_lr_${lr}_depth_${depth}_t${time_frame}"
+
+#     python /pscratch/sd/g/gzhao27/INR/INR_SAMPLE/inr_sample/single_image_inr.py \
+#         data.dataset_name=NS \
+#         inr.model_type=siren \
+#         data.space_factor=1 \
+#         optim.batch_size=2 \
+#         optim.lr_inr=$lr \
+#         optim.epochs=500 \
+#         optim.inner_steps=$inner_steps \
+#         inr.latent_dim=256 \
+#         inr.depth=$depth \
+#         optim.evo_every_epochs=10 \
+#         inr.hidden_dim=155 \
+#         saved_checkpoint=False \
+#         wandb.name=$run_name \
+#         wandb.use_wandb=True \
+#         wandb.project=workshop-inr-sampling-revise  \
+#         inr.w0=$w0 \
+#         sampling.rate=$sampling_rate \
+#         sampling.type=$sample_type \
+#         sampling.sample_num_schedular=constant \
+#         sampling.mutation_method=constant \
+#         sampling.profile_interval_method=lin_dec \
+#         sampling.profile_guide=value \
+#         sampling.n_clusters_2d_end=$n_finish \
+#         sampling.n_clusters_2d_start=$n_start \
+#         "data.split_ratios=[${train_ratio}, 0.01, 0.01]" \
+#         data.data_path=/pscratch/sd/g/gzhao27/INR/data/NS2d/ns_data_res2048_re${re}_7.npy\
+#         data.data_type=other \
+#         data.single_time_frame=${time_frame}
+#   done
+# done
 
 
 # data_type: mmap or other

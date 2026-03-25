@@ -194,6 +194,7 @@ def main(cfg: DictConfig) -> None:
     weight_decay_code = cfg.optim.weight_decay_code
     inner_steps = cfg.optim.inner_steps
     epochs = cfg.optim.epochs
+    evo_every_epochs = cfg.optim.evo_every_epochs
 
     # inr
     model_type = cfg.inr.model_type
@@ -364,7 +365,7 @@ def main(cfg: DictConfig) -> None:
     for step in range(epoch_start, epochs):
         
         use_rel_loss = True
-        step_show = step % 10 == 0
+        step_show = step % evo_every_epochs == 0
         step_show_last = step == epochs - 1
 
         # Start Timer

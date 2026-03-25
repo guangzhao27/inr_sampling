@@ -12,16 +12,15 @@ source ~/anaconda3/etc/profile.d/conda.sh
 conda activate torchgeo
 
 w0=30
-sampling_rate=2e-4
+sampling_rate=1e-3
 train_ratio=1
 inner_steps=6
-lr=1e-4 # 5.6e-5 non full 
+lr=1e-3 # 5.6e-5 non full 
 depth=6
 n_start=11
 n_finish=128
 sample_type=NMT
 time_frame=200
-re=10000
 cd /pscratch/sd/g/gzhao27/INR/SOMA/
 source ~/anaconda3/etc/profile.d/conda.sh
 conda activate torchgeo
@@ -33,19 +32,19 @@ dataset_name=Piecewise2D
 #   for sample_type in NMT random 2d_grid_linear EVOS; do
 for time_frame in 100; do
   for sample_type in null NMT random 2d_grid_linear EVOS; do
-    run_name="NS1024_single_${sample_type}_dataset_${dataset_name}_sampling_${sampling_rate}_lr_${lr}_depth_${depth}_t${time_frame}"
-
+    run_name="dataset_${dataset_name}_${sample_type}_sampling_${sampling_rate}_lr_${lr}_depth_${depth}_t${time_frame}"
     python /pscratch/sd/g/gzhao27/INR/INR_SAMPLE/inr_sample/single_image_inr.py \
         data.dataset_name=$dataset_name \
         inr.model_type=siren \
         data.space_factor=1 \
         optim.batch_size=2 \
         optim.lr_inr=$lr \
-        optim.epochs=100 \
+        optim.epochs=1000 \
         optim.inner_steps=$inner_steps \
         inr.latent_dim=256 \
         inr.depth=$depth \
         inr.hidden_dim=155 \
+        optim.evo_every_epochs=100 \
         saved_checkpoint=False \
         wandb.name=$run_name \
         wandb.use_wandb=True \

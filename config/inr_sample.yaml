@@ -27,7 +27,7 @@ data:
   #                                      (generate with: python utils/data/generate_burgers2d.py)
   #                                      e.g. /pscratch/sd/g/gzhao27/INR/data
   #   Piecewise2D : synthetic 2D piecewise function (in-memory, no disk needed)
-  #                 f(x,y) = sin(2πx) + beta * I(x>0.5) * sin(2π·alpha·y)
+  #                 f(x,y) = sin(2πx) + beta * I(y>0.5) * sin(2π·alpha·y)
   #                 configure with piecewise_* keys below
   data_to_encode:
   missing_rate:
@@ -59,6 +59,7 @@ optim:
   weight_decay_code: 0
   inner_steps : 3
   epochs : 10000
+  evo_every_epochs: 100
 
 inr:
   model_type : "siren"

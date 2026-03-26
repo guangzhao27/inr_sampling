@@ -1,5 +1,6 @@
 import os
 import math
+import glob
 import h5py
 import torch
 import random
@@ -61,686 +62,6 @@ def my_generator(directory):
         print(f"Loading: {file_path}")  # Optional logging
         data = np.load(file_path)
         yield data
-
-class TemporalDatasetWithCode(Dataset):
-    """Custom dataset for encoding task. Contains the values, the codes, and the coordinates."""
-
-    def __init__(self, v, grid, latent_dim=64, dataset_name=None, data_to_encode=None):
-        """
-        Args:
-            dataset
-            v (torch.Tensor): Dataset values, with shape (N Dx Dy C T). Where N is the
-            number of trajectories, Dx the size of the first spatial dimension, Dy the size
-            of the second spatial dimension, C the number of channels (ususally 1), and T the
-            number of timestamps.
-            grid (torch.Tensor): Coordinates, with shape (N Dx Dy 2). We suppose that we have
-            same grid over time.
-            latent_dim (int, optional): Latent dimension of the code. Defaults to 64.
-        """
-        N = v.shape[0]
-        T = v.shape[-1]
-        self.v = v
-        self.c = grid  # repeat_coordinates(grid, N).clone()
-        self.output_dim = self.v.shape[-2]
-        self.input_dim = self.c.shape[-2]
-        self.z = torch.zeros((N, latent_dim, T))
-        self.latent_dim = latent_dim
-        self.T = T
-        self.dataset_name = dataset_name
-        self.set_data_to_encode(data_to_encode)
-
-
-    def set_data_to_encode(self, data_to_encode):
-        self.data_to_encode = data_to_encode
-        dataset_name = self.dataset_name
-        N = self.v.shape[0]
-        T = self.v.shape[-1]
-
-        self.index_value = None
-        if (data_to_encode is not None) and (dataset_name is not None):
-            self.index_value = KEY_TO_INDEX[dataset_name][data_to_encode]
-            self.z = torch.zeros((N, self.latent_dim, T))
-            self.output_dim = 1
-
-        if data_to_encode is None:
-            c = len(KEY_TO_INDEX[dataset_name].keys())
-            # one code for the height / vorticity
-            # if c == 1, we squeeze it
-            self.z = torch.zeros((N, self.latent_dim, c, T)).squeeze(-2)
-
-    def __len__(self):
-        return len(self.v)
-
-    def __getitem__(self, idx):
-        """The tempral dataset returns whole trajectories, identified by the index.
-
-        Args:
-            idx (int): idx of the trajectory
-
-        Returns:
-            sample_v (torch.Tensor): the trajectory with shape (Dx Dy C T)
-            sample_z (torch.Tensor): the codes with shape (L T)
-            sample_c (torch.Tensor): the spatial coordinates (Dx Dy 2)
-        """
-        if torch.is_tensor(idx):
-            idx = idx.tolist()
-
-        if self.index_value is not None:
-            sample_v = self.v[idx, ..., self.index_value, :]
-        else:
-            sample_v = self.v[idx, ...]
-
-        sample_z = self.z[idx, ...]
-        sample_c = self.c[idx, ...]
-
-        return sample_v, sample_z, sample_c, idx
-
-    def __setitem__(self, z_values, idx):
-        """How to save efficiently the updated codes.
-
-        Args:
-            z_values (torch.Tensor): the updated latent code for the whole trajectory.
-            idx (int): idx of the trajectory.
-        """
-        z_values = z_values.clone()
-        self.z[idx, ...] = z_values
-
-
-class GraphSomaDataset(Dataset):
-    '''
-    data path: "/global/cfs/cdirs/m4259/ecucuzzella/soma_ppe_data/ml_converted/month_1/thedataset-impliciBottomDrag.hdf5"
-    hdf5_file.keys(): foward_0 ... foward_99
-    data shape: torch.Size([60, 100, 100, 30, 17])
-    '''
-    def __init__(self, data_path,
-                data_num = 10, 
-                train_num=20, 
-                feature_set = None, 
-                space_factor=1,
-                time_factor=1,
-                initial_step=10, 
-                test_ratio=0.1,
-                latent_dim=128, 
-                split='train', 
-                p_transform=None, 
-                feature_transform=None,
-                data_save_dir=None, 
-                mmap_dir=None,
-                sub_array_num=1, 
-                missing_rate=0.0, 
-                ):
-        self.name = "SOMA"
-        self.data_path =data_path # 
-        
-        self.inital_step = initial_step
-        self.space_factor = space_factor
-        self.time_factor = time_factor
-        self.feature_set = feature_set
-        self.latent_dim = latent_dim
-        self.missing_rate = missing_rate
-        
-        
-        self.hdf5_file = h5py.File(self.data_path, 'r')
-        self.keys = list(self.hdf5_file.keys()) # keys are 100 forward # data shape is (30, 100)
-        self.p_transform = p_transform
-        self.feature_transform=feature_transform
-        
-        if split == 'train':
-            self.idx_list = list(range(train_num))
-            self.keys = self.keys[:train_num]
-        elif split == 'val':
-            self.idx_list = list(range(train_num, train_num+data_num))
-            self.keys = self.keys[train_num:train_num+data_num]
-        else:
-            self.idx_list = list(range(-data_num, 0))
-            self.keys = self.keys[-data_num:]
-            
-        if data_save_dir:
-            self.data_save_dir = data_save_dir
-        else:
-            self.data_save_dir = os.path.join(
-                '/pscratch/sd/g/gzhao27/INR/SOMA/results/soma_graph_save', 
-                f's{self.space_factor}t{self.time_factor}')
-            os.makedirs(self.data_save_dir, exist_ok=True)
-        
-        self.mmap_dir = mmap_dir #/pscratch/sd/g/gzhao27/INR/SOMA/results/soma_mmap_save
-        if self.mmap_dir:
-            # RaggedMmap.from_generator(out_dir=self.mmap_dir, 
-            #                            sample_generator=my_generator(raw_np_dir), 
-            #                            batch_size=2)
-            self.mmap_data = RaggedMmap(self.mmap_dir)
-            
-        self.sub_array_num = sub_array_num
-        
-            
-        # this function generate self.T in its function
-        self.cal_cor_and_time_emb() # generate more self properties
-        
-        if self.sub_array_num > 1:
-            base_size = self.T // self.sub_array_num
-            extra = self.T % self.sub_array_num
-            
-            # Array to record the length of each subarray
-            self.sub_array_T = [base_size + 1 if i < extra else base_size for i in range(self.sub_array_num)]
-        
-        # self.dataset = [
-        #     self.reduce_resolution(torch.from_numpy(self.hdf5_file[key][:]).permute(1, 2, 3, 0, 4))
-        #     for key in self.keys
-        # ]
-        
-        # self.latent_vectors = [
-        #     torch.zeros(data.size(3), self.latent_dim)
-        #     for key in self.keys
-        # ]
-        
-        self.latent_vectors = []
-        for key in self.keys:
-            # xx = self.hdf5_file[key][:]
-            # reduced_T = len(xx[::time_factor])
-            # data = self.reduce_resolution(torch.from_numpy(self.hdf5_file[key][:]).permute(1, 2, 3, 0, 4))
-            if self.sub_array_num <= 1:
-                self.latent_vectors.append(torch.zeros(self.T, self.latent_dim))
-            else:
-                for tt in self.sub_array_T:
-                    self.latent_vectors.append(torch.zeros(tt, self.latent_dim))
-        
-    def reduce_resolution(self, _data):
-        """
-        Apply reduced resolution both in spatial and temporal dimensions.
-        """
-        # Reduce spatial and temporal dimensions according to reduced_resolution and reduced_resolution_t
-        _data = _data[
-            ::self.space_factor, 
-            ::self.space_factor, 
-            ::self.space_factor, 
-            ::self.time_factor
-        ]
-        
-        assert len(self.feature_set) == 1
-        _data = _data[..., self.feature_set]
-        
-        # Apply feature set reduction if provided
-        # if self.feature_set is not None:
-        #     _data = _data[..., self.feature_set]
-        
-        return _data
-    
-    def cal_cor_and_time_emb(self):
-        # _data = self.hdf5_file[self.keys[0]][:] # just take first data to get data shape information
-        _data = self.load_raw_data(0)
-        # _data = torch.from_numpy(_data)
-        # data = _data[..., :-1]
-        sx, sy, sz = _data.shape[0:3]
-        # total_T = _data.size(3)
-        
-        _data = self.reduce_resolution(_data)
-
-        # _data = _data[::self.space_factor, 
-        #               ::self.space_factor, 
-        #               ::self.space_factor, 
-        #               ::self.time_factor
-        #               ]
-
-        
-        # if self.feature_set is not None:
-        #     _data = _data[..., self.feature_set]
-
-        self.mask = _data[..., 0, 0]> -1000
-        # self.mu, self.sigma = self.gen_normalize_value(_data) # self.mu and self.sigma is the average over the first single data with index=0, you should not do that!, that is hard to update
-        
-        
-        # generate graph coordinates
-        T = _data.size(3)
-        self.T = T
-        cor = self.mask.nonzero()
-        spacial_emb = self.S_embedding(sx, sy, sz, cor)
-        time_list = [torch.ones(len(cor), dtype=torch.int)*t for t in range(T)]
-        
-        self.cor_t = cor.repeat(T, 1)
-        self.spacial_emb_t = spacial_emb.repeat(T, 1)
-        self.time_t = torch.cat(time_list, dim=0)
-        
-        # # feature should leave in get function
-        # feat_t = _data[self.cor_t[:, 0], self.cor_t[:, 1], self.cor_t[:, 2], self.time_t]
-
-    def S_embedding(self, sx, sy, sz, cor):
-        x = torch.arange(sx, dtype=torch.float32)
-        y = torch.arange(sy, dtype=torch.float32)
-        z = torch.arange(sz, dtype=torch.float32)
-        X, Y, Z = torch.meshgrid(x, y, z)
-        
-        lin_emb = lambda x, y: 2.0*x/(y-1) -1.0
-        X = lin_emb(X, sx)
-        Y = lin_emb(Y, sy)
-        Z = lin_emb(Z, sz)
-        
-        self.grid = torch.stack((X, Y, Z), dim=-1)
-        self.grid = self.grid[::self.space_factor, 
-                              ::self.space_factor, 
-                              ::self.space_factor, 
-                              ]
-        
-        spatial_embedding = self.grid[cor[:, 0], cor[:, 1], cor[:, 2]]
-        
-        return spatial_embedding
-
-    def gen_normalize_value(self, data):
-        # three dimensional data
-        mask_shape = self.mask.shape
-        # num_new_dims = len(data.shape) - len(mask_shape) - 1
-        expanded_mask = self.mask.view(*mask_shape, 1)
-        expanded_mask = expanded_mask.expand(*mask_shape, *data.shape[3:-1])
-
-        mu = torch.zeros(data.shape[-1])
-        std = torch.zeros(data.shape[-1])
-
-        for i in range(data.shape[-1]):
-            non_zero_data = data[..., i][expanded_mask]
-            mu[i] = non_zero_data.mean()
-            std[i] = non_zero_data.std()
-        
-        return mu, std
-    
-    def create_normalize_from_dataset(self):
-        assert self.feature_transform is None, 'feature transform should be none to create new normlaization'
-        
-        feat_list = []
-        p_list = []
-        for i in range(len(self.keys)):
-            graph = self.getitem(i)
-            T = graph.time.max().item()+1
-            # p_list.append(graph.ped_para)
-            for t in range(T):
-                tidx = (graph.time==t)
-                feat_list.append(graph.feat[tidx])
-            p_list.append(graph.pde_parameter.item())
-        feat_tensor = torch.stack(feat_list)
-        p_tensor = torch.tensor(p_list)
-        
-        feat_mean = feat_tensor.mean(dim=0)
-        feat_mean = torch.cat([feat_mean]*T)
-        feat_std = (feat_tensor - feat_tensor.mean(dim=0)).std()
-        
-        
-        feat_transform = partial(normalize_fn, mean=feat_mean, std=feat_std)
-        inv_feat_transform = partial(inv_normalize_fn, mean=feat_mean, std=feat_std)
-        
-        return feat_transform, inv_feat_transform
-        
-            
-    def update_feat_transform(self, feature_transform):
-        self.feature_transform = feature_transform
-        
-    def update_p_transform(self, p_transform):
-        self.p_transform = p_transform
-
-    # def normalize_data(self, data):
-    #     # three dimensional data
-    #     mask_shape = self.mask.shape
-    #     num_new_dims = len(data.shape) - len(mask_shape) - 1
-    #     expanded_mask = self.mask.view(*mask_shape, *[1]*num_new_dims)
-    #     expanded_mask = expanded_mask.expand(*mask_shape, *data.shape[3:-1])
-
-    #     for i in range(data.shape[-1]):
-    #         non_zero_data = data[..., i][expanded_mask]
-    #         data[..., i][expanded_mask] = (non_zero_data - self.mu[i])/self.sigma[i]
-            
-    def __len__(self):
-        return len(self.keys)*self.sub_array_num
-    
-    def load_raw_data(self, idx):
-        if self.mmap_dir:
-            rawidx = self.idx_list[idx]
-            _data = torch.from_numpy(self.mmap_data[rawidx])
-        else:        
-            key = self.keys[idx]
-            _data = torch.from_numpy(self.hdf5_file[key][:])
-        
-        _data = _data.permute(1, 2, 3, 0, 4)
-        return _data
-        
-    def getitem(self, idx):
-        # Y (trajectory) data dimension should be batch*sx*sy*sz*time*D
-        """
-        graph:
-            cor: the cor of each independent point (x, y, z)
-            time: time sequence lable for each independent point [0, 0, 0, 1, 1, 2, ...]
-                For a batch of data points, the time label will stack together, the next time sequence start with T as [T, T, T, T+1, T+1, ...]
-            feat: feature value of each point
-            T: total time of each data points (time sequence)
-            latent_vector: size of T*hidden_D for each data points
-            pde_parameter: size of 1*p_D for each data points
-            spacial_emb_t: the cor embedding of each independent point (xe, ye, ze)
-        """
-
-        _data = self.load_raw_data(idx)
-        pde_parameter = _data[0, 0, 0,0,  -1:]
-        
-        
-        # _data = _data[..., :-1]
-        
-
-        if self.p_transform:
-            pde_parameter = self.p_transform(pde_parameter)
-        
-        #reduce datasize
-        _data = self.reduce_resolution(_data)
-        # _data = _data[
-        #             ::self.space_factor, 
-        #             ::self.space_factor, 
-        #             ::self.space_factor, 
-        #             ::self.time_factor,
-        #             ]
-        # if self.feature_set is not None:
-        #     _data = _data[..., self.feature_set]
-            
-        feat_t_whole = _data[self.cor_t[:, 0], self.cor_t[:, 1], self.cor_t[:, 2], self.time_t]
-        
-            
-        if self.feature_transform:
-            feat_t_whole = self.feature_transform(feat_t_whole)
-        
-        # self.normalize_data(data)
-        if self.missing_rate > 0:
-            random_mask = torch.rand(self.cor_t.size(0)) > self.missing_rate
-            cor_t = self.cor_t[random_mask]
-            spacial_emb_t = self.spacial_emb_t[random_mask]
-            time_t = self.time_t[random_mask]
-            feat_t = feat_t_whole[random_mask]
-        else:
-            feat_t = feat_t_whole
-            cor_t = self.cor_t
-            spacial_emb_t = self.spacial_emb_t
-            time_t = self.time_t
-            
-        # feat_t_ori = feat_t.clone()
-        
-
-        # change to datapoint and store as a dataset
-        graph = Data(
-            cor=cor_t, time=time_t, feat=feat_t, 
-            T=torch.tensor(_data.size(3)), latent_vector=self.latent_vectors[idx], pde_parameter=pde_parameter,
-            space_emb=spacial_emb_t, 
-            # feat_ori=feat_t_ori,
-            )
-        return graph
-    
-    def __getitem__(self, idx):
-        graph = self.getitem(idx)
-        # if_feat_transform = 'frame_normalize' if self.feature_transform else ''
-        # graph_path = os.path.join(self.data_save_dir, 
-        #                           self.keys[idx]+if_feat_transform+str(self.latent_dim)+'.pt'
-        #                           )
-        # if os.path.exists(graph_path):
-        #     graph = torch.load(graph_path)
-        # else:
-        #     graph = self.getitem(idx)
-        #     torch.save(graph, graph_path)
-        return graph
-            
-    def __del__(self):
-        # Ensure the file is closed when the dataset object is deleted
-        if hasattr(self, 'hdf5_file'):
-            self.hdf5_file.close()
-            
-    
-    # trainset.update_latent_vector(i, z0[latent_idx: latent_idx+tempT])
-    def update_latent_vector(self, idx, tensor):
-        self.latent_vectors[idx] = tensor
-
-
-
-class GraphBurgers(Dataset):
-    def __init__(self, 
-                 datapath_dict,
-                 latent_dim,
-                 missing_rate,
-                 space_factor=1, time_factor=1,
-                 p_transform=None,
-                 ):
-        # datapath_dict includes datapath and the index_list of corresponding datapath, and parameter value of this datapath
-        # dataset include ['t-coordinate', 'tensor', 'x-coordinate']
-        # tensor shape (N, tdim, xdim)
-        # tdim: 201+1, xdim:1024
-
-        super().__init__()
-        
-        # self.datapath_dict = datapath_dict
-        self.missing_rate = missing_rate
-        self.latent_dim = latent_dim
-        self.space_factor = space_factor
-        self.time_factor = time_factor
-        self.p_transform = p_transform
-        
-        # assert self.space_factor is None
-        # assert self.time_factor is None
-        
-        feature_list = []
-        
-        dataset = {}
-        i = 0
-        
-        for datapath, (index_list, p) in datapath_dict.items():
-            tensor = torch.from_numpy(h5py.File(datapath)['tensor'][index_list, ::time_factor, ::space_factor])
-            tc = torch.from_numpy(h5py.File(datapath)['t-coordinate'][::time_factor])
-            xc = torch.from_numpy(h5py.File(datapath)['x-coordinate'][::space_factor])
-            
-            if self.missing_rate>0:
-                mask = torch.rand(tensor.shape)>self.missing_rate
-            else:
-                mask = torch.ones(tensor.shape, dtype=torch.bool)
-            
-            
-            
-            for index in range(tensor.size(0)):
-                # every index every t, generate cordinates and features
-                cor_list = []
-                feat_list = []
-                time_list = []
-                SE_list = []       
-                # TE_list = []     
-                p_list = []
-                
-                T = mask.size(1)
-                for t in range(T):
-                    tmpmask = mask[index, t, :]
-                    tmptensor = tensor[index, t, :]
-                    cor = tmpmask.nonzero()
-                    spacial_embedding = xc[tmpmask].reshape(-1, 1)
-                    # time_embedding = torch.ones(len(cor))*tc[t]
-                    cor_list.append(cor)
-                    feat_list.append(tmptensor[tmpmask])
-                    time_list.append(torch.ones(len(cor), dtype=torch.int)*t)
-                    SE_list.append(spacial_embedding)
-                    # TE_list.append(time_embedding)
-                
-                cor_t = torch.cat(cor_list, dim=0)
-                feat_t = torch.cat(feat_list, dim=0)
-                feat_t = feat_t.reshape(-1, 1)
-                time_t = torch.cat(time_list, dim=0)
-                SE_t = torch.cat(SE_list, dim=0)
-                # TE_t = torch.cat(TE_list, dim=0)
-                pde_parameter=torch.tensor(p)
-                if self.p_transform:
-                    pde_parameter = self.p_transform(pde_parameter)
-                datapoint = Data(cor=cor_t, time=time_t, 
-                                 feat=feat_t, T=torch.tensor(T), latent_vector=torch.zeros(T, self.latent_dim), 
-                                 space_emb=SE_t, time_emb=tc, pde_parameter=pde_parameter)
-                dataset[f"{i}"] = datapoint
-                i+=1
-                
-        self.dataset = dataset
-        
-    def __len__(self):
-        return len(self.dataset)
-    
-    def __getitem__(self, key):
-        graph = self.dataset[f"{key}"]
-
-        return graph
-
-
-
-class GraphBurgers2D(Dataset):
-    """
-    2D viscous Burgers equation dataset.
-
-    Loads from HDF5 files produced by `utils/data/generate_burgers2d.py`.
-
-    HDF5 layout (one file per viscosity nu):
-        tensor       : float32 (N, T, H, W)  -- scalar field u(x,y,t)
-        t-coordinate : float32 (T,)
-        x-coordinate : float32 (H,)
-        y-coordinate : float32 (W,)
-
-    The graph data contract follows GraphBurgers (1D) closely:
-        cor       : (N_pts, 2)  -- integer (i, j) grid indices
-        space_emb : (N_pts, 2)  -- normalized coords in [-1, 1]^2
-        feat      : (N_pts, 1)  -- scalar field values
-        time      : (N_pts,)    -- integer time index
-        T         : scalar      -- total time frames in this sample
-        latent_vector : (T, latent_dim)
-        pde_parameter : scalar  -- viscosity (normalized via p_transform)
-    """
-
-    def __init__(
-        self,
-        datapath_dict: dict,
-        latent_dim: int,
-        missing_rate: float,
-        space_factor: int = 1,
-        time_factor: int = 1,
-        p_transform=None,
-    ):
-        super().__init__()
-
-        self.missing_rate = missing_rate
-        self.latent_dim = latent_dim
-        self.space_factor = space_factor
-        self.time_factor = time_factor
-        self.p_transform = p_transform
-
-        dataset = {}
-        i = 0
-
-        for datapath, (index_list, p) in datapath_dict.items():
-            with h5py.File(datapath, "r") as f:
-                tensor = torch.from_numpy(
-                    f["tensor"][index_list, ::time_factor, ::space_factor, ::space_factor]
-                ).float()  # (N_sub, T, H, W)
-                tc = torch.from_numpy(f["t-coordinate"][::time_factor]).float()
-
-            N_sub, T, H, W = tensor.shape
-
-            # Normalized spatial embedding grid: (H, W, 2)
-            xs = 2.0 * torch.arange(H, dtype=torch.float32) / max(H - 1, 1) - 1.0
-            ys = 2.0 * torch.arange(W, dtype=torch.float32) / max(W - 1, 1) - 1.0
-            grid_x, grid_y = torch.meshgrid(xs, ys, indexing="ij")
-            spatial_grid = torch.stack([grid_x, grid_y], dim=-1)  # (H, W, 2)
-
-            if self.missing_rate > 0:
-                mask = torch.rand(tensor.shape) > self.missing_rate
-            else:
-                mask = torch.ones(tensor.shape, dtype=torch.bool)
-
-            pde_param_val = torch.tensor(p)
-            if self.p_transform is not None:
-                pde_param_val = self.p_transform(pde_param_val)
-
-            for n in range(N_sub):
-                cor_list, feat_list, time_list, se_list = [], [], [], []
-
-                for t in range(T):
-                    tmpmask = mask[n, t]                        # (H, W)
-                    tmptensor = tensor[n, t]                    # (H, W)
-                    cor = tmpmask.nonzero(as_tuple=False)       # (K, 2)
-                    se = spatial_grid[cor[:, 0], cor[:, 1]]     # (K, 2)
-                    cor_list.append(cor)
-                    feat_list.append(tmptensor[tmpmask].reshape(-1, 1))
-                    time_list.append(
-                        torch.full((len(cor),), t, dtype=torch.int)
-                    )
-                    se_list.append(se)
-
-                datapoint = Data(
-                    cor=torch.cat(cor_list, dim=0),
-                    feat=torch.cat(feat_list, dim=0),
-                    time=torch.cat(time_list, dim=0),
-                    space_emb=torch.cat(se_list, dim=0),
-                    T=torch.tensor(T),
-                    latent_vector=torch.zeros(T, self.latent_dim),
-                    pde_parameter=pde_param_val,
-                )
-                dataset[f"{i}"] = datapoint
-                i += 1
-
-        self.dataset = dataset
-
-    def __len__(self) -> int:
-        return len(self.dataset)
-
-    def __getitem__(self, key):
-        return self.dataset[f"{key}"]
-
-
-def create_burgers2d_dataset(
-    missing_rate: float = 0.5,
-    space_factor: int = 1,
-    time_factor: int = 1,
-    train_num: int = 100,
-    data_dir: str = "/pscratch/sd/g/gzhao27/INR/data",
-    latent_dim: int = 128,
-):
-    """
-    Build train / val / test GraphBurgers2D datasets.
-
-    Viscosity splits (mirror the 1-D Burgers convention):
-        train : nu = 0.001, 0.002, 0.005, 0.02, 0.05
-        val   : nu = 0.01   (held-out viscosity)
-        test  : nu = 0.002  (seen viscosity, held-out samples)
-
-    Data files must be pre-generated with:
-        python utils/data/generate_burgers2d.py --out_dir <data_dir>
-
-    Returns:
-        trainset, valset, testset, p_mean, p_std
-    """
-    train_p_list = (0.001, 0.002, 0.005, 0.02, 0.05)
-    val_p_list   = (0.01,)
-    test_p_list  = (0.002,)
-
-    p_mean = float(np.mean(train_p_list))
-    p_std  = float(np.std(train_p_list))
-    p_transform = lambda t: (t - p_mean) / p_std
-
-    path_fmt = os.path.join(data_dir, "2D_Burgers_Sols_Nu{}.hdf5")
-
-    valnum  = 100
-    testnum = 100
-
-    def _make_dict(p_list, start, n):
-        return {
-            path_fmt.format(p): (list(range(start, start + n)), p)
-            for p in p_list
-        }
-
-    traindict = _make_dict(train_p_list, 0,                       train_num)
-    valdict   = _make_dict(val_p_list,   train_num,                valnum)
-    testdict  = _make_dict(test_p_list,  train_num + valnum,       testnum)
-
-    common = dict(
-        latent_dim=latent_dim,
-        space_factor=space_factor,
-        time_factor=time_factor,
-        p_transform=p_transform,
-    )
-
-    trainset = GraphBurgers2D(datapath_dict=traindict, missing_rate=missing_rate, **common)
-    valset   = GraphBurgers2D(datapath_dict=valdict,   missing_rate=0.0,          **common)
-    testset  = GraphBurgers2D(datapath_dict=testdict,  missing_rate=0.0,          **common)
-
-    return trainset, valset, testset, p_mean, p_std
-
 
 class GraphNavierStokes(Dataset):
     # properties included in grpah of all time frame:
@@ -988,210 +309,6 @@ class GraphNavierStokesSampling(GraphNavierStokes):
             datapoint.latent_vector = latent_vector
     
         
-# Navier Stokes
-class NavierStokes(Dataset):
-    def __init__(
-        self, datapath, nx, sub=1, T=20, t_interval=1, n_train=None, n_test=None, missing_rate = 0.75, missing_same = True, train_mask = None):
-        self.S = nx // sub
-        self.T = T
-        self.sub = sub
-        self.t_interval = t_interval
-        self.n_train = n_train
-        self.n_test = n_test
-        
-        if n_test and missing_same:
-            assert train_mask is not None, 'Provide a train mask if missing positions are the same between train, test'
-        
-        # Missing rate designation
-        """
-        There are two variants of missing sensors. 
-        First, [v1] missing sensors are the same between training and testing
-        Second, [v2] missing sensors of training set are different from testing
-        Argument: missing_same controls that. [v1] missing_same = True, [v2] missing_same = False
-        """
-        self.missing_rate = missing_rate
-        self.remaining_rate = 1 - missing_rate
-        
-        
-        # Dataloading
-        try:
-            data = h5py.File(datapath)['u']
-        except:
-            data = scipy.io.loadmat(datapath)['u']
-            data = np.array(data).transpose(3, 1, 2, 0)
-        print('Loaded data: {}'.format(data.shape))
-        
-        if n_train:
-            self.a = torch.tensor(data[0 : 1, ::sub, ::sub, :n_train], dtype=torch.float).transpose(0, 3)
-            self.u = torch.tensor(data[1 : self.T + 1, ::sub, ::sub, :n_train], dtype=torch.float).transpose(0, 3)
-            
-            ## Addressing missing rate            
-            self.train_support_mask = self.get_mask()
-            
-            
-        if n_test:
-            self.a = torch.tensor(data[0 : 1, ::sub, ::sub, -n_test:], dtype=torch.float).transpose(0, 3)      # channel dimension = 1
-            self.u = torch.tensor(data[1 : self.T + 1, ::sub, ::sub, -n_test:], dtype=torch.float).transpose(0, 3) # channel dimension = 1
-            if missing_same:
-                self.test_support_mask = train_mask
-            else:
-                self.test_support_mask = self.get_mask()
-        
-        if n_train and n_test:
-            raise ValueError
-        if not n_train and not n_test:
-            raise ValueError
-            
-        self.get_mesh()
-            
-    def get_mask(self):
-        H, W = self.a.shape[1:3]
-        n_support = int(H * W * self.remaining_rate)
-        support_mask = torch.zeros(H, W) # get spatial dimension
-        loc = list(product(list(range(H)), list(range(W)))) # get all possible combination of H and W
-        random.shuffle(loc)
-        for h, w in loc[:n_support]:
-            support_mask[h,w] = 1
-        return support_mask
-    
-    
-    def get_mesh(self):
-        # Please use this mesh if need be.
-        # geometry locations (x, y)
-        mesh1 = torch.tensor(np.linspace(0, 1, self.S), dtype=torch.float)
-        mesh2 = torch.tensor(np.linspace(0, 1, self.S), dtype=torch.float)
-        mesh1 = mesh1.reshape(self.S, 1, 1).repeat([1, self.S, 1])
-        mesh2 = mesh2.reshape(1, self.S, 1).repeat([self.S, 1, 1])
-        self.mesh = torch.cat((mesh1, mesh2), dim=-1) # (S x S, 2) 
-        
-    def __len__(self):
-        return self.a.shape[0]
-
-    def __getitem__(self, idx):
-        return self.a[idx].unsqueeze(-2), self.u[idx].unsqueeze(-2)
-
-        # return xout, yout
-        
-def create_burgers_dataset(missing_rate=0.5, space_factor=1, time_factor=1, train_num=100):
-    trainnum = train_num
-    valnum = 100
-    testnum = 100
-    train_p_list=(0.001, 0.002, 0.004, 0.02, 0.04, 0.1)
-    p_mean = np.array(train_p_list).mean()
-    p_std = np.array(train_p_list).std()
-    p_transform = lambda tensor: (tensor - p_mean) / p_std
-    p_invtransform = lambda tensor: (tensor * p_std) + p_mean
-    
-    val_p_list = (0.01, )
-    test_p_list = (0.002, )
-    path_format = "/pscratch/sd/g/gzhao27/INR/data/1D_Burgers_Sols_Nu{}.hdf5"
-    def create_dict(p_list, start, Dnum):
-        Ddict = {}
-        for p in p_list:
-            temppath = path_format.format(p)
-            Ddict[temppath] = (list(range(start, start+Dnum)), p)
-        return Ddict
-    
-    traindict = create_dict(train_p_list, 0, trainnum)
-    valdict = create_dict(val_p_list, trainnum, valnum)
-    testdict = create_dict(test_p_list, trainnum+valnum, testnum)
-    
-    trainset = GraphBurgers(
-        datapath_dict=traindict,
-        latent_dim=128,
-        missing_rate=missing_rate,
-        space_factor=space_factor,
-        time_factor=time_factor,
-        p_transform=p_transform,
-    )
-    valset = GraphBurgers(
-        datapath_dict=valdict,
-        latent_dim=128,
-        missing_rate=0.,
-        space_factor=space_factor,
-        time_factor=time_factor,
-        p_transform=p_transform,
-    )
-    testset = GraphBurgers(
-        datapath_dict=testdict,
-        latent_dim=128,
-        missing_rate=0.,
-        p_transform=p_transform
-    )
-    return trainset, valset, testset, p_mean, p_std
-
-
-def soma_claculate_p_normalize(data_path):
-    p_list = []
-    with h5py.File(data_path, 'r') as f:
-        keys = list(f.keys())
-        for key in keys:
-            _data = f[key][:]
-            p_list.append(_data[0, 0, 0, 0, -1])
-    
-    p_array = np.array(p_list)
-    return p_array.mean(), p_array.std()
-
-def create_soma_dataset(ntrain, mmap_dir, space_factor, time_factor, latent_dim, missing_rate, val_missing_rate, feature_set, data_path, ):
-    print('for soma thedataset-impliciBottomDrag p_mean and p_std pre-calculated: 0.005342233, 0.002689823')
-    p_mean, p_std = 0.005342233, 0.002689823 # for 
-    p_transform = lambda tensor: (tensor - p_mean) / p_std
-    p_invtransform = lambda tensor: (tensor * p_std) + p_mean
-    
-    trainset0 = GraphSomaDataset(
-        data_path=data_path,
-        train_num=ntrain, 
-        feature_set=feature_set,
-        space_factor=space_factor,
-        time_factor=time_factor, 
-        latent_dim=latent_dim,
-        mmap_dir=mmap_dir,
-        missing_rate=0.0,
-    )
-    # create a separate create normlize transform function, avoid it to be related to the dataset sampling strategy
-    feat_transform, feat_inv_transform = trainset0.create_normalize_from_dataset() 
-    trainset = GraphSomaDataset(
-        data_path=data_path,
-        train_num=ntrain, 
-        feature_set=feature_set,
-        space_factor=space_factor,
-        time_factor=time_factor, 
-        latent_dim=latent_dim,
-        p_transform=p_transform,
-        mmap_dir=mmap_dir,
-        missing_rate=missing_rate,
-    )
-    trainset.update_feat_transform(feat_transform)
-    valset = GraphSomaDataset(
-        data_path=data_path,
-        train_num=ntrain, 
-        data_num=10,
-        feature_set=feature_set,
-        space_factor=space_factor,
-        time_factor=time_factor, 
-        latent_dim=latent_dim,
-        split='val',
-        p_transform=p_transform,
-        feature_transform=feat_transform,
-        mmap_dir=mmap_dir,
-        missing_rate=val_missing_rate,
-    )
-    testset = GraphSomaDataset(
-        data_path=data_path,
-        train_num=ntrain, 
-        data_num=10,
-        feature_set=[10],
-        space_factor=space_factor,
-        time_factor=time_factor, 
-        latent_dim=latent_dim,
-        split='test',
-        p_transform=p_transform,
-        feature_transform=feat_transform,
-        mmap_dir=mmap_dir,
-    )
-    
-    return trainset, valset, testset, feat_transform, feat_inv_transform
-# Original split ratios: 0.7, 0.15, 0.15
 def create_ns_dataset(datapath, latent_dim=256, space_factor=1, split_ratios=(0.5, 0.25, 0.25), seed=42, data_type='mmap', single_image=False):
     """
     Randomly split indices into train/val/test based on given ratios.
@@ -1456,6 +573,163 @@ def create_piecewise_dataset(
         eps=eps,
         latent_dim=latent_dim,
         missing_rate=0.0,
+    )
+
+
+class GraphBurgers2D(Dataset):
+    """
+    Graph dataset for generated 2D Burgers trajectories.
+
+    Expected HDF5 layout per file:
+      - tensor       : (N, T, H, W)
+      - t-coordinate : (T,)
+      - x-coordinate : (W,) optional for loading
+      - y-coordinate : (H,) optional for loading
+    """
+
+    def __init__(
+        self,
+        file_path,
+        latent_dim=256,
+        ssub=1,
+        missing_rate=0.0,
+        sample_idx=0,
+    ):
+        super().__init__()
+        self.file_path = file_path
+        self.latent_dim = latent_dim
+        self.ssub = ssub
+        self.missing_rate = missing_rate
+
+        with h5py.File(file_path, "r") as f:
+            if "tensor" not in f:
+                raise KeyError(f"Missing key 'tensor' in {file_path}")
+            raw = f["tensor"][:]  # (N, T, H, W)
+
+        if raw.ndim != 4:
+            raise ValueError(
+                f"Expected tensor with 4 dims (N,T,H,W), got shape {raw.shape} from {file_path}"
+            )
+
+        if sample_idx is not None:
+            if sample_idx < 0 or sample_idx >= raw.shape[0]:
+                raise IndexError(
+                    f"sample_idx={sample_idx} out of range for {file_path} with N={raw.shape[0]}"
+                )
+            raw = raw[sample_idx : sample_idx + 1]
+
+        # Optional spatial subsampling.
+        raw = raw[:, :, ::ssub, ::ssub]
+        tensor = torch.from_numpy(raw.copy()).float()  # (N, T, H, W)
+
+        self.height = tensor.size(2)
+        self.width = tensor.size(3)
+        self.T = tensor.size(1)
+
+        x_coords, y_coords = torch.meshgrid(
+            torch.arange(self.height, dtype=torch.float32),
+            torch.arange(self.width, dtype=torch.float32),
+            indexing="ij",
+        )
+        x_coords = 2.0 * x_coords / (self.width - 1) - 1.0
+        y_coords = 2.0 * y_coords / (self.height - 1) - 1.0
+        self.spatial_grid = torch.stack([x_coords, y_coords], dim=-1)  # (H, W, 2)
+
+        self.dataset = self._build_dataset(tensor)
+
+    def _build_dataset(self, tensor):
+        dataset = {}
+        N, T, H, W = tensor.shape
+
+        for n in range(N):
+            cor_list = []
+            feat_list = []
+            time_list = []
+            emb_list = []
+
+            for t in range(T):
+                if self.missing_rate > 0:
+                    mask_t = torch.rand(H, W) > self.missing_rate
+                else:
+                    mask_t = torch.ones(H, W, dtype=torch.bool)
+
+                cor_t = mask_t.nonzero(as_tuple=False)  # (K_t, 2)
+                feat_t = tensor[n, t][mask_t].reshape(-1, 1)
+                time_t = torch.full((len(cor_t),), t, dtype=torch.long)
+                emb_t = self.spatial_grid[cor_t[:, 0], cor_t[:, 1]]
+
+                cor_list.append(cor_t)
+                feat_list.append(feat_t)
+                time_list.append(time_t)
+                emb_list.append(emb_t)
+
+            datapoint = Data(
+                cor=torch.cat(cor_list, dim=0),
+                feat=torch.cat(feat_list, dim=0),
+                time=torch.cat(time_list, dim=0),
+                space_emb=torch.cat(emb_list, dim=0),
+                T=torch.tensor(T),
+                latent_vector=torch.zeros(T, self.latent_dim),
+            )
+            dataset[str(n)] = datapoint
+
+        return dataset
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, key):
+        return self.dataset[str(key)]
+
+
+def create_burgers2d_dataset(
+    data_dir,
+    nu=0.01,
+    latent_dim=256,
+    space_factor=1,
+    seed=42,
+    single_image=True,
+    sample_idx=0,
+):
+    """
+    Create a 2D Burgers graph dataset from generated HDF5 files.
+
+    Args:
+        data_dir: directory containing 2D_Burgers_Sols_Nu*.hdf5, or a specific file path
+        nu: viscosity value used in file naming (e.g. 0.01)
+        latent_dim: latent vector width
+        space_factor: spatial subsampling stride
+        seed: reserved for future split behavior
+        single_image: only True is supported in current single-image INR flow
+        sample_idx: which trajectory index to load from the selected HDF5 file
+    """
+    del seed  # reserved for future split support
+
+    if os.path.isfile(data_dir):
+        file_path = data_dir
+    else:
+        file_path = os.path.join(data_dir, f"2D_Burgers_Sols_Nu{nu}.hdf5")
+        if not os.path.exists(file_path):
+            candidates = sorted(glob.glob(os.path.join(data_dir, "2D_Burgers_Sols_Nu*.hdf5")))
+            if not candidates:
+                raise FileNotFoundError(
+                    f"No Burgers2D files found in {data_dir}. Expected 2D_Burgers_Sols_Nu*.hdf5"
+                )
+            raise FileNotFoundError(
+                f"Could not find {file_path}. Available files: {[os.path.basename(c) for c in candidates]}"
+            )
+
+    if not single_image:
+        raise NotImplementedError(
+            "create_burgers2d_dataset currently supports single_image=True only"
+        )
+
+    return GraphBurgers2D(
+        file_path=file_path,
+        latent_dim=latent_dim,
+        ssub=space_factor,
+        missing_rate=0.0,
+        sample_idx=sample_idx,
     )
 
 

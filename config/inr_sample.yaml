@@ -44,6 +44,9 @@ data:
     - 0.15
     - 0.15
   single_time_frame: 10
+  # Burgers2D runtime options (used when dataset_name = Burgers2D)
+  burgers2d_nu: 0.01          # selects file 2D_Burgers_Sols_Nu{nu}.hdf5
+  burgers2d_sample_idx: 0     # selects trajectory index within tensor[N, T, H, W]
   # Piecewise2D dataset parameters (only used when dataset_name = Piecewise2D)
   piecewise_resolution: 1024   # grid size H = W = resolution
   piecewise_alpha: 20.0       # high-frequency multiplier in y (right half, x > 0.5)

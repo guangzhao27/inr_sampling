@@ -8,7 +8,6 @@ import hydra
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader
 from util.logger import log
 from itertools import islice
 from time import time
@@ -22,12 +21,10 @@ from omegaconf import DictConfig, OmegaConf
 from utils.data.unstructure_dataset import (
     GraphNavierStokes,
     collate_graph_inr,
-    create_burgers_dataset,
-    create_burgers2d_dataset,
     create_piecewise_dataset,
-    create_soma_dataset,
     get_graph_t_idx,
     create_ns_dataset,
+    create_burgers2d_dataset,
 )
 from train_utility_sampling.train_utility import (
     train_step, 
@@ -73,25 +70,7 @@ def initialize_wandb(cfg):
         print("id", run.id)
         print("dir", run.dir)
         return run
-
-# def gradient_norm_image(norms, depth):
-#     df = pd.DataFrame({
-#         "Step": list(range(len(norms))),
-#         "Gradient Norm": norms
-#     })
-
-#     ax = sns.lineplot(x="Step", y="Gradient Norm", data=df,
-#                   linewidth = 1.5)
-
-#     ax.set_yscale('log')
-
-#     ax.set_xlabel("Steps")
-#     ax.set_ylabel("Gradient Norm")
-
-#     save_path = f"/sdcc/u/smccue/projects/inr_sampling/visuals/norms/norms_depth{depth}.eps"
-#     plt.savefig(save_path)
-#     plt.close()
-
+    
 def create_inr_sampler(cfg, inr, graph, current_date_str, run_name, device='cuda'):
     """
     Build and return an INRSingle2dSamplerWrapper or EVOSSampler based on cfg.sampling 
@@ -138,6 +117,78 @@ def create_inr_sampler(cfg, inr, graph, current_date_str, run_name, device='cuda
         n_clusters_2d_end=cfg.sampling.n_clusters_2d_end,
         epochs = cfg.optim.epochs,
         image_width = image_width
+    )
+
+
+def _build_trainset(cfg, latent_dim, data_path, dataset_name, data_type, seed, space_factor):
+    """Create the dataset and return (trainset, input_dim, output_dim, transforms)."""
+    if dataset_name == "NS":
+        input_dim = 2
+        output_dim = 1
+        trainset = create_ns_dataset(
+            datapath=data_path,
+            data_type=data_type,
+            seed=seed,
+            single_image=True,
+        )
+        feat_transform, feat_inv_transform = None, None
+    elif dataset_name == "Burgers2D":
+        input_dim = 2
+        output_dim = 1
+        trainset = create_burgers2d_dataset(
+            data_dir=data_path,
+            nu=cfg.data.get("burgers2d_nu", 0.01),
+            latent_dim=latent_dim,
+            space_factor=space_factor,
+            seed=seed,
+            single_image=True,
+            sample_idx=cfg.data.get("burgers2d_sample_idx", 0),
+        )
+        feat_transform, feat_inv_transform = None, None
+    elif dataset_name == "Piecewise2D":
+        input_dim = 2
+        output_dim = 1
+        trainset = create_piecewise_dataset(
+            resolution=cfg.data.piecewise_resolution,
+            alpha=cfg.data.piecewise_alpha,
+            beta=cfg.data.piecewise_beta,
+            eps=cfg.data.piecewise_eps if cfg.data.piecewise_eps else None,
+        )
+        feat_transform, feat_inv_transform = None, None
+    else:
+        raise NotImplementedError(f"The dataset ${dataset_name} does not have a corresponding class.")
+
+    return trainset, input_dim, output_dim, feat_transform, feat_inv_transform
+
+
+def _select_single_graph(trainset, cfg, dataset_name):
+    """Pick one graph from trainset (by configurable index) and one time frame."""
+    graph_sample_idx = int(cfg.data.get("graph_sample_idx", 0))
+    if graph_sample_idx < 0 or graph_sample_idx >= len(trainset):
+        raise IndexError(
+            f"data.graph_sample_idx={graph_sample_idx} is out of range for trainset size {len(trainset)}"
+        )
+
+    graph = trainset[graph_sample_idx]
+
+    t = cfg.data.single_time_frame
+    if dataset_name == "Piecewise2D":
+        t = 0
+
+    indices_t = get_graph_t_idx(graph, t)
+    if len(indices_t) == 0:
+        t_min = int(graph.time.min().item()) if graph.time.numel() > 0 else -1
+        t_max = int(graph.time.max().item()) if graph.time.numel() > 0 else -1
+        raise ValueError(
+            f"No nodes found for data.single_time_frame={t}. Available time range is [{t_min}, {t_max}]"
+        )
+
+    return Data(
+        cor=graph.cor[indices_t],
+        feat=graph.feat[indices_t],
+        time=torch.zeros(len(indices_t)),
+        space_emb=graph.space_emb[indices_t],
+        T=torch.tensor(1),
     )
 
 @hydra.main(config_path="../config/", config_name="inr_sample.yaml")
@@ -208,72 +259,20 @@ def main(cfg: DictConfig) -> None:
     
    
    
-    """ define dataset """    
-    if dataset_name == "NS":
-        input_dim=2
-        output_dim=1 
-        trainset = create_ns_dataset(
-            datapath = data_path, 
-            data_type=data_type, 
-            seed=seed,
-            single_image=True  # If True, only use one image from the dataset
-        )
-        
-        feat_transform, feat_inv_transform = None, None
-    elif dataset_name == "SOMA":
-        # raw_np_dir = '/pscratch/sd/g/gzhao27/INR/SOMA/results/impliciBottomDrag_np'
-        input_dim = 3
-        output_dim = 1
-        feature_set = [10]
-        missing_rate = 1 - cfg.sampling.rate
-        trainset, valset, testset, feat_transform,  feat_inv_transform = create_soma_dataset(
-            ntrain, mmap_dir, space_factor, time_factor, 
-            latent_dim, missing_rate, val_missing_rate, 
-            feature_set, data_path, )
-    elif dataset_name == "Burgers":
-        input_dim = 1
-        output_dim = 1
-        trainset, valset, testset, p_mean, p_std = create_burgers_dataset()
-        feat_transform, feat_inv_transform = None, None
-    elif dataset_name == "Burgers2D":
-        input_dim = 2
-        output_dim = 1
-        trainset, valset, testset, p_mean, p_std = create_burgers2d_dataset(
-            data_dir=data_path,
-        )
-        feat_transform, feat_inv_transform = None, None
-    elif dataset_name == "Piecewise2D":
-        input_dim = 2
-        output_dim = 1
-        trainset = create_piecewise_dataset(
-            resolution=cfg.data.piecewise_resolution,
-            alpha=cfg.data.piecewise_alpha,
-            beta=cfg.data.piecewise_beta,
-            eps=cfg.data.piecewise_eps if cfg.data.piecewise_eps else None,
-        )
-        feat_transform, feat_inv_transform = None, None
-    else:
-        raise NotImplementedError(f"The dataset ${dataset_name} does not have a corresponding class.")
+    """ define dataset """
+    trainset, input_dim, output_dim, feat_transform, feat_inv_transform = _build_trainset(
+        cfg=cfg,
+        latent_dim=latent_dim,
+        data_path=data_path,
+        dataset_name=dataset_name,
+        data_type=data_type,
+        seed=seed,
+        space_factor=space_factor,
+    )
 
     ntrain = len(trainset)
 
-    train_loader = DataLoader(dataset=trainset, batch_size=1, shuffle=True, collate_fn=collate_graph_inr)
-
-    # print("len train_loader:\n", str(len(train_loader)))
-    graph = next(iter(train_loader))
-    t = cfg.data.single_time_frame  # Use this to time frame
-    # Piecewise2D is a single-frame dataset (time is always 0); ignore single_time_frame
-    if dataset_name == "Piecewise2D":
-        t = 0
-    indices_t = get_graph_t_idx(graph, t)
-
-    graph = Data(
-        cor=graph.cor[indices_t],
-        feat=graph.feat[indices_t],
-        time=torch.zeros(len(indices_t)),  # set time to 0 tensor
-        space_emb=graph.space_emb[indices_t],
-        T=torch.tensor(1),
-    )
+    graph = _select_single_graph(trainset, cfg, dataset_name)
     graph = graph.to(device)
     graph_ori = graph.clone()
     # print("indices ->\n" + str(len(indices_t)))
@@ -423,6 +422,7 @@ def main(cfg: DictConfig) -> None:
                         "Time": total_train_time, 
                         "psnr": psnr,
                         "ssim": ssim,
+                        "max_gpu_memory_GB": torch.cuda.max_memory_allocated() / 1e9,
                     },
                     step=step
                 )

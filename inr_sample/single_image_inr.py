@@ -33,7 +33,13 @@ from train_utility_sampling.train_utility import (
     train_step_single_image,
     validation_step_single_image,
 )
-from train_utility_sampling.SamplerWrapper import INRSingle2dSamplerWrapper, add_cluster_label, graph_2d_cluster_single_image, EVOSSampler
+from train_utility_sampling.SamplerWrapper import (
+    INRSingle2dSamplerWrapper,
+    INRSingle2dAdaptiveSamplerWrapper,
+    add_cluster_label,
+    graph_2d_cluster_single_image,
+    EVOSSampler,
+)
 from utils.data.load_data import set_seed
 from utils.load_inr import create_inr_instance, load_inr_model
 from datetime import datetime
@@ -94,6 +100,16 @@ def create_inr_sampler(cfg, inr, graph, current_date_str, run_name, device='cuda
         # Run your graph clustering side-effect for a single image
         _start = cfg.sampling.n_clusters_2d_start
         graph_2d_cluster_single_image(graph, _start, 0.01, cluster_type)
+    elif sampling_type == "2d_grid_adaptive":
+        save_path = f'./sampled_frames/{current_date_str + run_name}'
+        return INRSingle2dAdaptiveSamplerWrapper(
+            model=inr,
+            iters=0,
+            device=device,
+            sample_rate=cfg.sampling.rate,
+            save_samples_path=save_path,
+            image_width=image_width,
+        )
     elif sampling_type == "EVOS":
         H = int(np.sqrt(len(graph.feat)))
         img = graph.feat.reshape(H, H)

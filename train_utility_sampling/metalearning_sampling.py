@@ -443,11 +443,18 @@ def single_image_step(
         # loss = sampler._sampler_compute_loss(features_recon, features, step)
         loss = sampler._sampler_compute_loss(features_recon, features, step)
     else:
-        # loss = ((features_recon - graph.feat)**2).mean()
-        # if not is_train:
-            # print("---features recon---\n" + str(features_recon.shape))
-            # print("---gt features---\n" + str(graph.feat.shape))
-        loss = F.mse_loss(features_recon, graph.feat)
+        # Use weighted MSE when sampler attaches per-sample importance weights.
+        if hasattr(graph, "weight") and graph.weight is not None:
+            err = features_recon - graph.feat
+            w = graph.weight.to(err)
+            weighted_sq_err = (w * err.pow(2)).sum()
+            w_sum = w.sum()
+            if torch.isfinite(w_sum) and w_sum.item() > 0:
+                loss = weighted_sq_err / w_sum / len(err)
+            else:
+                loss = err.pow(2).mean()
+        else:
+            loss = F.mse_loss(features_recon, graph.feat)
 
     # Calculate PSNR and SSIM when return_reconstructions is True
     psnr_score = None

@@ -1,342 +1,335 @@
 import torch
 import numpy as np
-from PIL import Image
-from typing import Union, List, Tuple
 from pathlib import Path
 from torch_geometric.data import Data
 import os
 import matplotlib.pyplot as plt
 from skimage.segmentation import slic
 from collections import defaultdict
-import random
-from utils.data.unstructure_dataset import get_graph_t_idx
-from skimage.segmentation import slic
-from .sampler import mt_sampler, save_samples, save_losses
 import math
-# from .strategy import strategy_factory
-# https://github.com/chen2hang/INT_NonparametricTeaching/blob/bfc995d43c81584e9d2d4c8aa93571c662c129e0/src/nmt.py
+import torch.nn.functional as F
 
-# From EVOS
+from utils.data.unstructure_dataset import get_graph_t_idx
 from util.misc import fix_seed
 from components.laplacian import compute_laplacian_loss as compute_laplacian
 from components.nmt import mt_scheduler_factory
 from components.transform import Transform
-import torch.nn.functional as F
-from tqdm import trange
-from time import time
+from utils.quadtree import HierarchicalImageGrid, ImageCell
+from train_utility_sampling.taylor_estimation import (
+    grad_variance_ground_truth,
+    cell_grad_variance_estimate_with_norm_corrected,
+    cell_grad_variance_estimate_with_jacrev,
+    loss_variance_ground_truth,
+)
+
 
 class InrSamplerWrapper:
     """
-    Wrapper class for the coordinate sampling algorithms.
+    Wrapper class for coordinate sampling algorithms in INR training.
 
     Args:
-        model (torch.nn.Module): The model to be trained.
-        iters (int): The number of iterations to train the model.
-        scheduler (str, optional): The type of scheduler to use. Defaults to "step".
-        strategy (str, optional): The type of strategy to use. Defaults to "incremental".
-        starting_ratio (float, optional): The starting ratio for the NMT algorithm. Defaults to 0.2.
-        top_k (bool, optional): Whether to use top-k sampling. Defaults to True.
-        save_samples_path (Path, optional): The path to save the samples. Defaults to Path("logs/sampling").
-        save_losses_path (Path, optional): The path to save the losses. Defaults to Path("logs/losses").
-        save_name (str, optional): The name to save the samples and losses. Defaults to None.
-        save_interval (int, optional): The interval to save the samples and losses. Defaults to 1000.
-
-    Elaborations on some important Args:
-
-        <schedulers> determine the ratio of samples to be taken at each iteration.
-        Types of schedulers available (defined in scheduler.py):
-            - "step": mt_step
-            - "linear": mt_linear
-            - "cosine": mt_cosineAnnealing
-            - "reverse-cosine": mt_revCosineAnnealing
-            - "constant": mt_constant
-        
-        <strategies> determine the intervals at which samples are taken.
-        Types of strategies available (defined in strategy.py):
-            - "incremental": incremental
-            - "reverse-incremental": revIncremental
-            - "expoenential": exponential
-            - "dense": dense
-            - "void": void
-
-        <top_k> determines whether to we select the samples based on the highest loss values.
-        If otherwise, we will select samples randomly.
+        model (torch.nn.Module): The INR model to be trained.
+        iters (int): Number of training iterations.
+        n_clusters_2d_start (int): Starting number of 2D clusters. Defaults to 100.
+        n_clusters_2d_end (int): Ending number of 2D clusters. Defaults to 100.
+        epochs (int): Total number of training epochs. Defaults to 5000.
+        device (str): Device to run sampling on. Defaults to "cuda:0".
+        sample_type (str): Type of sampling strategy ("random", "NMT", "3d_cluster"). Defaults to "random".
+        sample_rate (float): Fraction of nodes to sample. Defaults to 0.5.
+        save_samples_path (Path): Directory to save sampled images. Defaults to Path("logs/sampling").
+        save_interval (int): Interval for saving samples. Defaults to 100.
+        image_width (int): Width of the image grid. Defaults to 512.
     """
     def __init__(
-                self,
-                n_clusters_2d_start: 100,
-                n_clusters_2d_end: 100,
-                epochs: 5000,
-                model: torch.nn.Module,
-                iters: int,
-                device: str="cuda:0",
-                sample_type: str="random",
-                sample_rate: float=0.5,
-                save_samples_path: Path=Path("logs/sampling"),
-                # scheduler: str="step",
-                #  strategy: str="incremental",
-                #  starting_ratio: float=0.2,
-                #  top_k: bool=True,
-                #  save_samples_path: Path=Path("logs/sampling"),
-                #  save_losses_path: Path=Path("logs/losses"),
-                #  save_name: str=None,
-                save_interval: int=100,
-                image_width: int=512,
-                ):
-        self.n_clusters_2d_start = n_clusters_2d_start
-        self.n_clusters_2d_end = n_clusters_2d_end
-        self.epochs = epochs
+        self,
+        model: torch.nn.Module,
+        iters: int,
+        n_clusters_2d_start: int = 100,
+        n_clusters_2d_end: int = 100,
+        epochs: int = 5000,
+        device: str = "cuda:0",
+        sample_type: str = "random",
+        sample_rate: float = 0.5,
+        save_samples_path: Path = Path("logs/sampling"),
+        save_interval: int = 100,
+        image_width: int = 512,
+    ):
         self.model = model
         self.device = torch.device(device)
         self.model.to(self.device)
-        # self.scheduler = mt_scheduler_factory(scheduler)
-        # self.strategy = strategy_factory(strategy)
+        
         self.sample_type = sample_type
         self.sample_rate = sample_rate
         self.iters = iters
+
+        if sample_type == "2d_grid_linear":
+            self.n_clusters_2d_start = n_clusters_2d_start
+            self.n_clusters_2d_end = n_clusters_2d_end
+            self.epochs = epochs
+
         self.save_interval = save_interval
         self.save_samples_path = save_samples_path
         self.image_width = image_width
 
-    def sample(self, outer_step: int, inner_step: int, graph: Data, modulations: torch.Tensor=None, save_image=False, ) -> Data:
-        """
-        Perform the NMT sampling.
 
-        Args:
-            outer_step (int): The current meta outer step, control if or not to sample.
-            inner_step (int): indicate the sampling iteration, for save image only.
-            
-            modulation is the meta learning trained modulation
-        """
+    def _get_T(self, graph: Data) -> int:
+        """Extract total number of time frames from graph.T."""
         if hasattr(graph.T, "sum"):
-            # covers both np.ndarray and np.int64
-            T = graph.T.sum()
-        else:
-            # integer fallback
-            T = graph.T
-        if self.sample_type == "random":            
+            return graph.T.sum()
+        return graph.T
+    
+    def _sample_random(self, graph: Data, T: int) -> torch.Tensor:
+        """Randomly sample nodes from each time frame."""
+        sampled_indices = []
+        for t in range(T):
+            indices_t = (graph.time == t).nonzero(as_tuple=True)[0]
+            n_t = indices_t.numel()
+            n_samples = max(int(n_t * self.sample_rate), 1)
+            perm = torch.randperm(n_t, device=self.device)[:n_samples]
+            sampled_indices.append(indices_t[perm])
+        return torch.cat(sampled_indices, dim=0)
+    
+    def _sample_nmt(self, graph: Data, modulations: torch.Tensor, T: int) -> torch.Tensor:
+        """Sample using Non-parametric Machine Teaching (NMT) - select high-error nodes."""
+        with torch.no_grad():
+            graph = graph.to(self.device)
+            modulations = modulations.to(self.device)
+            preds = self.model.modulated_forward(graph.space_emb, modulations[graph.time.cpu()])
+            dif = torch.sum(torch.abs(graph.feat - preds), 1)
+            
             sampled_indices = []
-            # For each time frame, randomly sample a subset of nodes.
             for t in range(T):
-                # Get indices for nodes belonging to time frame t.
                 indices_t = (graph.time == t).nonzero(as_tuple=True)[0]
                 n_t = indices_t.numel()
-                # Ensure at least one node is sampled per time frame.
-                n_samples = max(int(n_t * self.sample_rate), 1)
-                # Randomly permute indices and select n_samples of them.
-                perm = torch.randperm(n_t, device=self.device)[:n_samples]
-                sampled_indices.append(indices_t[perm])
+                _, top_idx = torch.topk(dif[indices_t], int(self.sample_rate * n_t))
+                sampled_indices.append(indices_t[top_idx])
             
-            # Concatenate indices from all time frames.
-            # sampled_indices = torch.cat(sampled_indices, dim=0)
-            # Sort the combined indices by time to preserve temporal order.
-            sampled_idx = torch.cat(sampled_indices, dim=0)
+            return torch.cat(sampled_indices, dim=0)
+    
+    def _sample_3d_cluster(self, graph: Data, modulations: torch.Tensor, T: int) -> torch.Tensor:
+        """Sample using 3D clustering - cluster-based sampling with error-based selection."""
+        W, H = graph.cor.max(axis=0)[0] + 1
+        n_samples = max(1, int(W * H * T * self.sample_rate))
+        num_per_cluster = max(1, math.ceil(n_samples / len(graph.cluster_set[0])))
+        
+        # Get rough sample from clusters
+        rough_idx = sample_random_node_indices_per_cluster(
+            graph, cluster_dim='3d', num_per_cluster=num_per_cluster
+        )
+        
+        # Compute errors on rough sample
+        times = graph.time[rough_idx]
+        space_emb = graph.space_emb[rough_idx].to(self.device)
+        feats = graph.feat[rough_idx].to(self.device)
+        mod = modulations.to(self.device)
+        
+        with torch.no_grad():
+            preds = self.model.modulated_forward(space_emb, mod[times.cpu()])
+            diffs = torch.sum((feats - preds).abs(), dim=1)
+        
+        # Select top-k from each time frame
+        sampled_per_t = []
+        for t in range(T):
+            local_mask = (times == t).nonzero(as_tuple=True)[0]
+            if local_mask.numel() == 0:
+                continue
             
+            count = min(int(W * H * self.sample_rate), local_mask.numel())
+            _, topk_local = torch.topk(diffs[local_mask], count)
+            selected_global = rough_idx[local_mask[topk_local.cpu()]]
+            sampled_per_t.append(selected_global)
+        
+        return torch.cat(sampled_per_t, dim=0)
+
+    def sample(
+        self, 
+        outer_step: int, 
+        inner_step: int, 
+        graph: Data, 
+        modulations: torch.Tensor = None, 
+        save_image: bool = False
+    ) -> Data:
+        """
+        Perform coordinate sampling on the graph.
+
+        Args:
+            outer_step (int): Current meta outer step (for saving images).
+            inner_step (int): Current sampling iteration (for saving images).
+            graph (Data): Input graph with coordinates, features, and time information.
+            modulations (torch.Tensor, optional): Modulation vectors for NMT/3d_cluster sampling.
+            save_image (bool): Whether to save visualization of sampled points.
+
+        Returns:
+            Data: Sampled graph with subset of nodes.
+        """
+        T = self._get_T(graph)
+        
+        # Select sampling method
+        if self.sample_type == "random":
+            sampled_idx = self._sample_random(graph, T)
+            dif = None
         elif self.sample_type == "NMT":
-            assert modulations is not None, "Modulations must be provided for NMT sampling."
-                
-            with torch.no_grad():
-                # forward pass
-                graph = graph.to(self.device)
-                modulations = modulations.to(self.device)
-                preds = self.model.modulated_forward(graph.space_emb, modulations[graph.time.cpu()])
-                
-                features = graph.feat
-                dif = torch.sum(torch.abs(features - preds), 1)
-                sampled_indices = []
-                for t in range(T):
-                    indices_t = (graph.time == t).nonzero(as_tuple=True)[0]
-                    n_t = indices_t.numel()
-                    _, top_idx = torch.topk(dif[indices_t], int(self.sample_rate * n_t))
-                    sampled_indices.append(indices_t[top_idx])
-                
-                sampled_idx = torch.cat(sampled_indices, dim=0)
+            assert modulations is not None, "Modulations required for NMT sampling."
+            sampled_idx = self._sample_nmt(graph, modulations, T)
+            dif = None  # Could extract from _sample_nmt if needed
         elif self.sample_type == "3d_cluster":
-            assert modulations is not None, "Modulations must be provided for clustering sampling."
-            W, H = graph.cor.max(axis=0)[0] +1
-            n_samples = max(1, int(W * H * T * self.sample_rate))
-            
-            # this is just an estimate of the num_per_cluster, can not be accurate
-            # because the number of nodes in each cluster can vary.
-            num_per_cluster = max(1, math.ceil(n_samples / len(graph.cluster_set[0])))
-            
-            rough_idx = sample_random_node_indices_per_cluster(
-                graph, cluster_dim='3d', num_per_cluster=num_per_cluster
-                )
-            times = graph.time[rough_idx]                      # shape = [N_rough]
-            space_emb = graph.space_emb[rough_idx].to(self.device)  # [N_rough, D]
-            feats     = graph.feat[rough_idx].to(self.device)       # [N_rough, F]
-            mod       = modulations.to(self.device)
-            with torch.no_grad():
-                # forward pass
-                # graph = graph.to(self.device)
-                # modulations = modulations.to(self.device)
-                preds = self.model.modulated_forward(space_emb, mod[times.cpu()])  # [N_rough, F]
-                diffs = torch.sum((feats - preds).abs(), dim=1)      
-            sampled_per_t = []
-            
-            # TODO: make it sample over whole graph
-            for t in range(T):
-                # local positions in the rough_idx array
-                local_mask = (times == t).nonzero(as_tuple=True)[0]
-                if local_mask.numel() == 0:
-                    continue
-
-                count = min(int(W*H*self.sample_rate), local_mask.numel())
-                _, topk_local = torch.topk(diffs[local_mask], count)
-
-                # map those back to the original-graph indices
-                selected_global = rough_idx[local_mask[topk_local.cpu()]]
-                sampled_per_t.append(selected_global)
-
-            # 4) Concatenate all selected indices
-            sampled_idx = torch.cat(sampled_per_t, dim=0)                
-            
+            assert modulations is not None, "Modulations required for 3d_cluster sampling."
+            sampled_idx = self._sample_3d_cluster(graph, modulations, T)
+            dif = None
         else:
             raise NotImplementedError(f"Sampling type {self.sample_type} is not implemented.")
 
+        # Create sampled graph
         sampled_graph = Data(
             cor=graph.cor[sampled_idx],
             time=graph.time[sampled_idx],
             feat=graph.feat[sampled_idx],
             space_emb=graph.space_emb[sampled_idx],
-            T=graph.T,  # global property (total time frames) remains unchanged
-            latent_vector=graph.latent_vector  # global latent vector remains unchanged
+            T=graph.T,
+            latent_vector=graph.latent_vector
         )
-        # sampled_graph = sampled_graph.to(device)
         
         if save_image:
-            self.save_image_path = os.path.join(self.save_samples_path,  f"{self.sample_type}_o{outer_step}_i{inner_step}")
-            if 'dif' not in locals():
-                dif = None
+            self.save_image_path = os.path.join(
+                self.save_samples_path, 
+                f"{self.sample_type}_o{outer_step}_i{inner_step}"
+            )
             self._save_sample_images(graph, sampled_graph, dif=dif)
+        
         return sampled_graph
 
-
-    def get_ratio(self):
-        return self.ratio
-    
-    def get_interval(self):
-        return self.mt_intervals
-
-    def get_saved_samples_path(self):
-        return self.save_sample_path
-
-    def get_saved_losses_path(self):
-        return self.save_loss_path
-
-    def get_saved_tint_path(self):
-        return self.save_tint_path
-
-    def _tint_data_with_samples(self, data, sample_idx, tint_color: List[float]=[0.5, 0.0, 0.0]):
-        """Relabel the data with given vis_label at the sample_idx indices."""
-        if sample_idx is None: 
-            return None
-        
-        new_data = data.detach().clone()
-        vis_label = torch.tensor(tint_color).to(data.device)
-        if data.shape[-1] == 1:
-            vis_label = vis_label[0]
-
-        new_data[sample_idx] = torch.clamp(new_data[sample_idx] + vis_label, max=1.0)
-
-        return new_data
-    
-    def _preprocess_img(self, image, h, w, c):
-        """Preprocess the image for saving."""
-        if torch.min(image) < 0:
-            image = image.clamp(-1, 1).view(h, w, c)       # clip to [-1, 1]
-            image = (image + 1) / 2                        # [-1, 1] -> [0, 1]
-        else:
-            image = image.clamp(0, 1).view(h, w, c)       # clip to [0, 1]
-
-        image = image.cpu().detach().numpy()
-
-        return image
-    
-    def _save_image(self, img, path, h, w, color_mode="RGB"):
-        """Save the image to the given path."""
-        img = Image.fromarray((img *255).astype(np.uint8), mode=color_mode)
-        if img.size[0] > 512:
-            img = img.resize((512, int(512*h/w)), Image.LANCZOS)
-        img.save(path)
-        print(f"Image saved to {path}")
-        
-    
-    def _save_sample_images(self, graph, sampled_graph, dif=None):
+    def _save_sample_images(self, graph: Data, sampled_graph: Data, dif: torch.Tensor = None):
         """
-        Save an image for each time frame with red dots indicating sampled positions.
+        Save visualization images for each time frame showing sampled positions.
         
-        Parameters:
-        - graph: torch_geometric Data object with attributes cor (coords), time, feat (field values), T (total frames)
-        - sorted_idx: 1D tensor of indices of sampled nodes
+        Args:
+            graph: Full graph with all nodes.
+            sampled_graph: Graph containing only sampled nodes.
+            dif: Optional difference/error map for visualization.
         """
-        # Create directory if it doesn't exist
         os.makedirs(self.save_image_path, exist_ok=True)
         
-        # print("graph.t init shape: ", str(graph.T.shape))
-        # Total number of time frames
-        if isinstance(graph.T, torch.Tensor) and graph.T.dim() >=1:
-            T_show = graph.T[0]
-        else:
-            T_show = graph.T
-        # print("***cor shape***\n" + str(graph.cor.shape))
-        W = graph.cor[:, 0].max()+1
-        H = graph.cor[:, 1].max()+1
+        T_show = self._get_T(graph)
+        W = int(graph.cor[:, 0].max() + 1)
+        H = int(graph.cor[:, 1].max() + 1)
         
-        # Loop over each time frame
-        # for t in range(T_show):
-        # print("T_Show:", str(T_show))
         for t in range(T_show):
-            # Mask for all nodes at time t
+            # Get data for current time frame
             frame_mask = (graph.time == t)
-            coords = graph.cor[frame_mask].cpu().numpy()
             values = graph.feat[frame_mask].cpu().numpy()
-            # print("---sampled_frame values---\n" + str(values))
             
-            # Mask for sampled indices at time t
             sampled_frame_mask = (sampled_graph.time == t)
             sampled_coords = sampled_graph.cor[sampled_frame_mask].cpu().numpy()
             
-            # Plot the full field
+            # Plot field with sampled points
             plt.figure()
-            field = values.reshape(H, W)  # Reshape for color mapping
+            field = values.reshape(H, W)
             plt.imshow(field, cmap='viridis', origin='lower')
-            plt.axis('off')            
-            # Overlay sampled points
-            plt.scatter(sampled_coords[:, 1], sampled_coords[:, 0],
-                        c='red', s=0.015625,
-            )
+            plt.axis('off')
+            plt.scatter(sampled_coords[:, 1], sampled_coords[:, 0], c='red', s=0.015625)
             plt.title(f'Time Frame {t}')
             
-            
-            
-            # Save figure
             filename = Path(self.save_image_path) / f'frame_{t:03d}.png'
             plt.savefig(filename, dpi=150, bbox_inches='tight')
             plt.close()
             
+            # Optionally plot difference map
             if dif is not None:
-                # Overlay differences if provided
                 plt.figure()
                 dif_frame = dif[frame_mask].cpu().numpy().reshape(H, W)
                 plt.imshow(dif_frame, cmap='hot', alpha=0.5, origin='lower')
-                plt.axis('off')            
-                plt.scatter(sampled_coords[:, 1], sampled_coords[:, 0],
-                            c='red', s=10,
-                )
+                plt.axis('off')
+                plt.scatter(sampled_coords[:, 1], sampled_coords[:, 0], c='red', s=10)
                 plt.title(f'Time Frame {t}')
+                
                 filename = Path(self.save_image_path) / f'frame_{t:03d}_dif.png'
                 plt.savefig(filename, dpi=150, bbox_inches='tight')
                 plt.close()
 
 
+def _extract_T_info(T_raw):
+    """Extract time and graph information from graph.T."""
+    if isinstance(T_raw, int):
+        return T_raw, T_raw, 1
+    
+    if torch.is_tensor(T_raw):
+        if T_raw.dim() == 0:
+            T_val = T_raw.item()
+            return T_val, T_val, 1
+        elif T_raw.dim() == 1:
+            if not torch.all(T_raw == T_raw[0]):
+                raise ValueError("All entries of graph.T must be equal when it's a 1-D tensor")
+            return T_raw.sum().item(), T_raw[0].item(), T_raw.size(0)
+    
+    raise TypeError(f"Unexpected type for graph.T: {type(T_raw)}")
+
+
 def sample_random_node_indices_per_cluster(
-    graph,
-    cluster_dim = '2d',
+    graph: Data,
+    cluster_dim: str = '2d',
     num_per_cluster: int = 1,
-    ) -> torch.Tensor:
-    """
+) -> torch.Tensor:
+    """Sample random node indices from each cluster in a graph."""
+    T_total, T, graph_num = _extract_T_info(graph.T)
+    W, H = graph.cor.max(axis=0)[0] + 1
+    nodes_per_graph = T * W * H
+    device = torch.device("cuda")
+    
+    def extract_samples(cluster_dict, graph_idx):
+        """Extract samples from a cluster dictionary."""
+        samples = []
+        offset = graph_idx * nodes_per_graph
+        for idx_tensor in cluster_dict.values():
+            n = idx_tensor.numel()
+            if n < num_per_cluster:
+                raise AssertionError(
+                    f"Cluster has {n} nodes, but requested {num_per_cluster} samples. "
+                    "Reduce sampling rate or number of clusters."
+                )
+            perm = torch.randperm(n)[:num_per_cluster]
+            chosen = idx_tensor[perm].to(device) + offset
+            samples.append(chosen)
+        return samples
+    
+    all_samples = []
+    if cluster_dim == '2d':
+        for t in range(T_total):
+            frame_cluster_dict = graph.cluster_set[t]
+            graph_idx = t // T
+            all_samples.extend(extract_samples(frame_cluster_dict, graph_idx))
+    elif cluster_dim == '3d':
+        for graph_idx in range(graph_num):
+            cluster_dict = (graph.cluster_set[graph_idx] if isinstance(graph.cluster_set, list)
+                           else graph.cluster_set)
+            all_samples.extend(extract_samples(cluster_dict, graph_idx))
+    else:
+        raise ValueError(f"cluster_dim must be '2d' or '3d', got '{cluster_dim}'")
+    
+    return torch.cat(all_samples)
+
+
+def graph_3d_cluster(graph: Data, n_segments: int, compactness: float, cluster_type: str = 'slic'):
+    """Apply 3D clustering to graph data."""
+    T = graph.T.sum()
+    W, H = graph.cor.max(axis=0)[0] + 1
+    graph.cluster_set = [defaultdict(dict)]
+    vol = graph.feat.reshape(T, W, H)
+    
+    if cluster_type == 'slic':
+        segments = slic(vol, n_segments=n_segments, compactness=compactness,
+                       start_label=0, channel_axis=None)
+    else:
+        raise NotImplementedError(f"Unknown cluster_type: {cluster_type}")
+    
+    segments_flat = torch.tensor(segments).reshape(-1)
+    for i in range(segments.max() + 1):
+        mask = segments_flat == i
+        graph.cluster_set[0][i] = torch.where(mask)[0]
+    graph.segments = segments
+
+
+def graph_2d_cluster_old(graph, n_segments, compactness, cluster_dim='2d', num_per_cluster: int=1) -> None:
+    """OLD VERSION - TO BE REMOVED
     Sample random node indices from each cluster in a graph.
     
     """
@@ -512,6 +505,7 @@ class INRSingle2dSamplerWrapper(InrSamplerWrapper):
         n_samples = max(int(n_t * self.sample_rate), 1)
         if self.sample_type == "random":
             sampled_idx = torch.randperm(n_t, device=self.device)[:n_samples]
+        
         elif self.sample_type == "NMT":
             with torch.no_grad():
                 graph = graph.to(self.device)
@@ -519,16 +513,28 @@ class INRSingle2dSamplerWrapper(InrSamplerWrapper):
                 features = graph.feat
                 dif = torch.sum(torch.abs(features - preds), 1)
                 _, sampled_idx = torch.topk(dif, n_samples)
-        elif self.sample_type == '2d_cluster':
+        
+        elif self.sample_type == '2d_grid_linear':
             # t0 = time()
             _start = self.n_clusters_2d_start
             _end = self.n_clusters_2d_end
             n_bins= np.round(_start + ((_end - _start) / self.epochs) * inner_step).astype(int)
-            bounds = generate_equal_bins(0, self.image_width-1, n_bins, device='cpu')  # Example usage on CPU
-            cor = sample_multiple_from_intervals(bounds, n_bins*2, device='cpu')  # Example usage on CPU
-            cor1 = cor[:, :n_bins]
-            cor2 = cor[:, n_bins:].T
-            rough_idx = (cor1 * self.image_width + cor2).flatten().to(self.device)
+            n_per_cell = max(1, math.ceil(n_samples / (n_bins * n_bins)))
+            bounds_1d = generate_equal_bins(0, self.image_width-1, n_bins, device='cpu')  
+            x_bounds = bounds_1d  # (n_bins, 2)
+            y_bounds = bounds_1d  # assuming square grid, reuse same bounds for y
+            # Create all combinations of x and y bounds
+            x_low = x_bounds[:, 0].unsqueeze(1).expand(n_bins, n_bins).reshape(-1)  # (n_bins*n_bins,)
+            x_high = x_bounds[:, 1].unsqueeze(1).expand(n_bins, n_bins).reshape(-1)  # (n_bins*n_bins,)
+            y_low = y_bounds[:, 0].unsqueeze(0).expand(n_bins, n_bins).reshape(-1)  # (n_bins*n_bins,)
+            y_high = y_bounds[:, 1].unsqueeze(0).expand(n_bins, n_bins).reshape(-1)  # (n_bins*n_bins,)
+
+            bounds = torch.stack([x_low, x_high, y_low, y_high], dim=1)  # (n_bins*n_bins, 4)
+            cor = sample_multiple_from_2d_intervals(bounds, n_per_cell, device='cpu')  
+            
+            x_coords = cor[:, :, 0]  # x-coordinates
+            y_coords = cor[:, :, 1]  # y-coordinates
+            rough_idx = (y_coords * self.image_width + x_coords).flatten().to(self.device)
             space_emb = graph.space_emb[rough_idx].to(self.device)  # [N_rough, D]
             feats = graph.feat[rough_idx].to(self.device)  # [N_rough, F]
             # print(" time for 2d_cluster sampling rough idx: ", str(time()-t0))
@@ -541,7 +547,44 @@ class INRSingle2dSamplerWrapper(InrSamplerWrapper):
             sampled_idx = rough_idx[topk_local]
             # print("time for 2d_cluster sampling: ", str(cal_time))
             
+        elif self.sample_type == "2d_grid_adaptive":
             
+            grid = HierarchicalImageGrid(1024, 1024, initial_grid_size=32)
+            evaluation_function = lambda x: cell_grad_variance_estimate_with_jacrev(x, graph, self.model, self.device)
+            grid.iterative_subdivision(evaluation_function, iterations=5, percentage=11)
+            bounds, cell_size, _ = grid.get_leaf_properties_tensor()
+            cell_num = bounds.shape[0]
+            n_per_cell = max(1, math.ceil(n_samples / cell_num))
+            cor = sample_multiple_from_2d_intervals(bounds, n_per_cell)
+            x_coords = cor[:, :, 0]  # x-coordinates
+            y_coords = cor[:, :, 1]  # y-coordinates
+            rough_idx = (y_coords * self.image_width + x_coords).flatten().to(self.device)
+            # space_emb = graph.space_emb[rough_idx].to(self.device)  # [N_rough, D]
+            # feats = graph.feat[rough_idx].to(self.device)  # [N_rough, F]
+            # print(" time for 2d_cluster sampling rough idx: ", str(time()-t0))
+            # t0 = time()
+            # with torch.no_grad():
+            #     preds = self.model(space_emb)
+            #     dif = torch.sum((feats - preds).abs(), dim=1)
+            # n_samples = min(n_samples, len(dif))
+            # _, topk_local = torch.topk(dif, n_samples)
+            # random select n_samples from rough_idx
+            sampled_idx = rough_idx[torch.randperm(len(rough_idx), device=self.device)[:n_samples]]
+            
+            # sampled_idx = rough_idx[topk_local]
+            
+            
+            # pass
+            # if inner_step % 1 == 0:
+            #     graph = graphtreebuilder_2d_adaptive_single_image()
+            # n_per_cell = max(1, math.ceil(n_samples / len(graph.cluster_set[0])))
+
+            # cor = sample_multiple_from_2d_intervals(bounds, n_per_cell, device='cpu')
+            # graph = graph.update_with_samples(cor)
+            
+            # and then add weight to each sample, add weight to graph. 
+            
+
         elif self.sample_type == "2d_cluster_slic":
             # For 2D graphs, we can still use the 3D cluster sampling function
             # but it will sample from the 2D clusters.
@@ -565,10 +608,6 @@ class INRSingle2dSamplerWrapper(InrSamplerWrapper):
             rough_idx = sample_random_node_indices_per_cluster(
                 graph, cluster_dim='2d', num_per_cluster=num_per_cluster
                 )
-            
-            # rough_idx  sample from 2d grid, randomly sample one from each dim, and then combine
-            
-            
             space_emb = graph.space_emb[rough_idx].to(self.device)  # [N_rough, D]
             feats = graph.feat[rough_idx].to(self.device)  # [N_rough, F]
             with torch.no_grad():
@@ -582,7 +621,7 @@ class INRSingle2dSamplerWrapper(InrSamplerWrapper):
             raise NotImplementedError(f"Sampling type {self.sample_type} is not implemented.")
         
         # print("---sampled_idx---" + str(sampled_idx))
-
+        graph.to(self.device)
         sampled_graph = Data(
             cor=graph.cor[sampled_idx],
             time=graph.time[sampled_idx],
@@ -597,7 +636,166 @@ class INRSingle2dSamplerWrapper(InrSamplerWrapper):
             if self.sample_type != "NMT":
                 dif = None
             self._save_sample_images(graph, sampled_graph, dif=dif)
-        return sampled_graph
+        return sampled_graph.to(self.device)
+
+class INRSingle2dAdaptiveSamplerWrapper(InrSamplerWrapper):
+    def __init__(
+        self, 
+        model: torch.nn.Module,
+        iters: int, 
+        device: str = "cuda:0",
+        sample_rate: float = 0.5,
+        save_samples_path: Path = Path("logs/sampling"),
+        save_interval: int = 100,
+        image_width: int = 512,
+        ):
+        super().__init__(
+            model=model,
+            iters=iters,
+            device=device,
+            sample_type="2d_grid_adaptive",
+            sample_rate=sample_rate,
+            save_samples_path=save_samples_path,
+            save_interval=save_interval,
+            image_width=image_width,    
+        )
+        
+        # Store graph reference for evaluation function
+        self.cached_graph = None
+    
+    def _create_evaluation_function(self, graph: Data, mode: str = 'gradient'):
+        """
+        Create evaluation function with graph context.
+        Uses the new quadtree API where cells are passed directly as ImageCell objects.
+        
+        Args:
+            graph: The graph data to evaluate cells against
+            
+        Returns:
+            Evaluation function that takes cells and returns variance estimates
+        """
+        def evaluate_cells(cells: list) -> list:
+            """
+            Evaluate gradient variance for a list of cells.
+            
+            Args:
+                cells: List of ImageCell objects
+                
+            Returns:
+                List of variance values (one per cell)
+            """
+            # Build tensor of cell coordinates: [N, 4] with format [y_start, y_end, x_start, x_end]
+            cell_coords = []
+            cell_areas = []
+            
+            for cell in cells:
+                # Note: cell boundaries are now inclusive after quadtree fix
+                cell_coords.append([cell.y_start, cell.y_end, cell.x_start, cell.x_end])
+                cell_areas.append(cell.area)
+            
+            cell_coords_tensor = torch.tensor(cell_coords, device=self.device)
+            cell_areas_tensor = torch.tensor(cell_areas, device=self.device, dtype=torch.float32)
+            
+            # Compute gradient variance for all cells at once
+            if mode == 'gradient':
+                grad_variances = cell_grad_variance_estimate_with_jacrev(
+                    cell_coords_tensor, graph, self.model, self.device
+                )
+            
+                # Weight by cell area (larger cells contribute more)
+                weighted_std = grad_variances.sqrt() * cell_areas_tensor
+            
+                return weighted_std.tolist()
+            
+            if mode == 'loss':
+                loss_variance = loss_variance_ground_truth(
+                    cell_coords_tensor, graph, self.model, self.device
+                )
+                
+                cell_value = loss_variance.sqrt() * cell_areas_tensor
+                return cell_value.tolist()
+        
+        return evaluate_cells
+    def sample(
+        self, 
+        inner_step: int,
+        graph: Data,
+        save_image: bool = False,
+        mode: str = 'loss',
+        ) -> Data:
+        """
+        Adaptive sampling: decide cell sizes based on gradient variance estimation,
+        then sample coordinates from each cell.
+        
+        Args:
+            inner_step: Current training step
+            graph: Input graph with spatial data
+            save_image: Whether to save visualization
+            
+        Returns:
+            Sampled graph data
+        """
+        n_t = graph.cor.shape[0]
+        n_samples = max(int(n_t * self.sample_rate), 1)
+        
+        # Create adaptive grid with gradient-based subdivision
+        
+        grid = HierarchicalImageGrid(self.image_width, self.image_width, initial_grid_size=16)
+        
+        # Create evaluation function with graph context
+        eval_fn = self._create_evaluation_function(graph, mode=mode)
+        
+        # Perform adaptive subdivision based on gradient variance
+        grid.iterative_subdivision(
+            eval_fn, 
+            iterations=5, 
+            percentage=10, 
+            batch_mode=True
+        )
+        
+        # Get cell boundaries and sample from each cell
+        bounds, cell_sizes, values = grid.get_leaf_properties_tensor(evaluation_function=eval_fn, device=self.device)
+        
+        counts = sample_counts_poisson(values, expected_total=n_samples)
+        n_cells = bounds.shape[0]
+        n_per_cell = max(1, int(np.ceil(n_samples / n_cells)))
+        
+        # Sample coordinates from cells (bounds are now inclusive)
+        samples_xy, cell_ids, ptr = sample_variable_from_2d_intervals_vcounts(bounds, counts, device=self.device)
+        
+        # Convert (x,y) -> flat index
+        x_coords = samples_xy[:, 0]  # (total_samples,)
+        y_coords = samples_xy[:, 1]  # (total_samples,)
+        sampled_idx = y_coords * self.image_width + x_coords  # (total_samples,)
+
+        # Create per-sample weights:
+        # Weight per sample in cell i: cell_area / n_samples_from_cell_i
+        # Here cell_area = cell_sizes[i], n_samples_from_cell_i = counts[i]
+        # Use gather via cell_ids
+        counts_f = counts.to(torch.float32)
+        cell_sizes_f = cell_sizes.to(torch.float32)
+
+        # Avoid division by zero (even though samples only exist where counts>0, this is safer)
+        per_cell_weight = cell_sizes_f / values  
+        # proportional weights, values is the cell probability, cell_sizes_f is the cell area
+        per_cell_weight = per_cell_weight / torch.sum(per_cell_weight) / n_samples
+        sampled_weights = per_cell_weight[cell_ids]         # (total_samples,)
+        graph.to(self.device)
+        sampled_graph = Data(
+            cor=graph.cor[sampled_idx],
+            time=graph.time[sampled_idx],
+            feat=graph.feat[sampled_idx],
+            space_emb=graph.space_emb[sampled_idx],
+            weight=sampled_weights,
+        )
+        
+        if save_image:
+            self.save_image_path = os.path.join(
+                self.save_samples_path, f"adaptive_i{inner_step}"
+            )
+            self._save_sample_images(graph, sampled_graph)
+        
+        return sampled_graph.to(self.device)
 
 # 2d cluster sampler
 def graph_2d_cluster_single_image(graph, n_segments, compactness=1, cluster_type='slic'):
@@ -803,7 +1001,6 @@ class EVOSSampler:
             self.sample_num, dtype=torch.bool, device=self.device
         )
         selection_mask[selected_indices] = True
-        # print("===Augmented Unbiased Mutation Reached===\nEpoch: " + str(epoch))
         return selection_mask
 
     def _evos_is_fitness_eval_iter(self, epoch):
@@ -817,12 +1014,10 @@ class EVOSSampler:
             _start = self.cfg.sampling.init_interval
             _end = self.cfg.sampling.end_interval
             _cur_interval = _start + ((_end - _start) / self.cfg.optim.epochs) * epoch
-            # print("===cur interval===\n" + str(_cur_interval))
             return int(_cur_interval)
 
     def _evos_frequency_aware_crossover(self, pred, gt, epoch): 
         error_map = F.mse_loss(pred, gt, reduction="none").mean(1)
-        # print("***FA Crossover Reached***\nEpoch: " + str(epoch))
         if self.cfg.sampling.crossover_method == "add":
             r_img = self.reconstruct_img(pred)
             laplace_map = F.mse_loss(
@@ -990,35 +1185,131 @@ class EVOSSampler:
 
         return graph
     
-    
-# grid sampler functions
 
-class GridSampler(InrSamplerWrapper):
-    pass
-    
-def sample_multiple_from_intervals(bounds, n_samples, device='cuda'):
+@torch.no_grad()
+def sample_counts_poisson(values: torch.Tensor, expected_total: float, eps: float = 1e-12) -> torch.Tensor:
     """
-    Sample multiple integers from each interval.
+    values: [N] >= 0
+    """
+    if values.dim() != 1:
+        raise ValueError("values must be 1D [N].")
+    if expected_total < 0:
+        raise ValueError("expected_total must be >= 0.")
+
+    v = values.clamp_min(0)
+    s = v.sum()
+    if s <= eps:
+        return torch.zeros_like(v, dtype=torch.long)
+
+    lam = (expected_total * v) / s  # [N]
+    counts = torch.poisson(lam)     # float tensor, integer-valued
+    return counts.to(torch.long)
+
+
+def sample_multiple_from_2d_intervals(bounds, n_samples, device='cuda'):
+    """
+    Sample multiple 2D coordinate pairs from each 2D interval.
+    Optimized for large n_samples.
     
     Args:
-        bounds: tensor of shape (n_intervals, 2)
-        n_samples: number of samples per interval
+        bounds: tensor of shape (n_cells, 4) where each row is [x_low, x_high, y_low, y_high]
+        n_samples: number of samples per cell
+        cell_sizes: (deprecated) kept for backward compatibility
         device: device to run on
     
     Returns:
-        tensor of shape (n_intervals, n_samples)
+        tensor of shape (n_cells, n_samples, 2) containing (x, y) coordinates
     """
     bounds = bounds.to(device)
-    n_intervals = len(bounds)
+    n_cells = bounds.size(0)
     
-    # Expand bounds for vectorized sampling
-    low = bounds[:, 0].unsqueeze(1).expand(n_intervals, n_samples)
-    high = bounds[:, 1].unsqueeze(1).expand(n_intervals, n_samples)
+    # Calculate ranges for each cell (add 1 for inclusive sampling)
+    x_range = bounds[:, 1] - bounds[:, 0] + 1  # (n_cells,)
+    y_range = bounds[:, 3] - bounds[:, 2] + 1  # (n_cells,)
     
-    rand_vals = torch.rand(n_intervals, n_samples, device=device)
-    samples = low + torch.floor(rand_vals * (high - low + 1)).long()
+    # Generate random values directly in the target shape
+    rand_vals = torch.rand(n_cells, n_samples, 2, device=device, dtype=torch.float32)
+    
+    # Vectorized sampling using broadcasting
+    # rand_vals[:, :, 0] for x, rand_vals[:, :, 1] for y
+    x_samples = bounds[:, 0:1] + torch.floor(rand_vals[:, :, 0] * x_range.unsqueeze(1))
+    y_samples = bounds[:, 2:3] + torch.floor(rand_vals[:, :, 1] * y_range.unsqueeze(1))
+    
+    # Stack efficiently without intermediate tensors
+    samples = torch.stack([x_samples, y_samples], dim=2).long()
     
     return samples
+
+
+@torch.no_grad()
+def sample_variable_from_2d_intervals_vcounts(bounds: torch.Tensor,
+                                      counts: torch.Tensor,
+                                      device: str = "cuda"):
+    """
+    Variable number of integer (x, y) samples per cell, sampled uniformly from inclusive 2D box bounds.
+
+    Args:
+        bounds: (n_cells, 4) each row [x_low, x_high, y_low, y_high] (integer-like)
+        counts: (n_cells,) number of samples for each cell (int/long), can be zero
+        device: 'cuda' or 'cpu'
+
+    Returns:
+        samples: (total_samples, 2) long tensor, packed samples
+        cell_ids: (total_samples,) long tensor, indicates which cell each sample belongs to
+        ptr: (n_cells+1,) long tensor, ptr[i]: start index of cell i in samples, ptr[i+1] end
+             So samples[ptr[i]:ptr[i+1]] are samples from cell i.
+    """
+    bounds = bounds.to(device)
+    counts = counts.to(device=device, dtype=torch.long)
+
+    if bounds.dim() != 2 or bounds.size(1) != 4:
+        raise ValueError("bounds must have shape (n_cells, 4).")
+    if counts.dim() != 1 or counts.numel() != bounds.size(0):
+        raise ValueError("counts must have shape (n_cells,).")
+    if (counts < 0).any():
+        raise ValueError("counts must be >= 0.")
+
+    n_cells = bounds.size(0)
+    total = int(counts.sum().item())
+
+    # ptr for slicing back per cell
+    ptr = torch.zeros(n_cells + 1, device=device, dtype=torch.long)
+    if n_cells > 0:
+        ptr[1:] = torch.cumsum(counts, dim=0)
+
+    if total == 0:
+        samples = torch.empty((0, 2), device=device, dtype=torch.long)
+        cell_ids = torch.empty((0,), device=device, dtype=torch.long)
+        return samples, cell_ids, ptr
+
+    # Build cell_ids without Python loops
+    cell_ids = torch.repeat_interleave(torch.arange(n_cells, device=device, dtype=torch.long), counts)
+
+    # Precompute ranges (inclusive)
+    x_low = bounds[:, 0].to(torch.long)
+    x_high = bounds[:, 1].to(torch.long)
+    y_low = bounds[:, 2].to(torch.long)
+    y_high = bounds[:, 3].to(torch.long)
+
+    x_range = (x_high - x_low + 1).clamp_min(1)  # avoid non-positive
+    y_range = (y_high - y_low + 1).clamp_min(1)
+
+    # Gather per-sample lows and ranges
+    x_low_s = x_low[cell_ids]
+    y_low_s = y_low[cell_ids]
+    x_rng_s = x_range[cell_ids]
+    y_rng_s = y_range[cell_ids]
+
+    # Randoms in [0,1)
+    r = torch.rand((total, 2), device=device, dtype=torch.float32)
+
+    # Integer uniform in inclusive box
+    x = x_low_s + torch.floor(r[:, 0] * x_rng_s.to(torch.float32)).to(torch.long)
+    y = y_low_s + torch.floor(r[:, 1] * y_rng_s.to(torch.float32)).to(torch.long)
+
+    samples = torch.stack((x, y), dim=1)
+    return samples, cell_ids, ptr
+
 
 def generate_equal_bins(low, high, n_bins, device='cuda'):
     """
@@ -1058,3 +1349,57 @@ def generate_equal_bins(low, high, n_bins, device='cuda'):
         current_pos += width
     
     return bounds
+
+
+def create_inr_sampler(cfg, inr, graph, current_date_str, run_name, device='cuda'):
+    """
+    Build and return an INRSingle2dSamplerWrapper or EVOSSampler based on cfg.sampling 
+    settings, or None if no sampling type is specified.
+    """
+    sampling_type = cfg.sampling.type
+    image_width = graph.cor.max().item() + 1  # Set image width from space_emb shape
+    
+    if sampling_type is None:
+        return None
+
+    # Map special 2d_cluster types to a unified sampler_name + cluster_type
+    # cluster_map = {
+    #     '2d_cluster_slic': 'slic',
+    #     '2d_grid_linear': 'grid',
+    # }
+    save_path = f'./sampled_frames/{current_date_str + run_name}'
+    if sampling_type == "2d_grid_adaptive":
+        return INRSingle2dAdaptiveSamplerWrapper(
+            model=inr,
+            iters=0,
+            device=device,
+            sample_rate=cfg.sampling.rate,
+            save_samples_path=save_path,
+            image_width = image_width
+        )
+    
+    if sampling_type == "EVOS":
+        H = int(np.sqrt(len(graph.feat)))
+        img = graph.feat.reshape(H, H)
+        img = img.unsqueeze(0)
+        return EVOSSampler(cfg, img, graph)
+
+    # if sampling_type in cluster_map:
+        # cluster_type = cluster_map[sampling_type]
+        # Run your graph clustering side-effect for a single image
+        # _start = cfg.sampling.n_clusters_2d_start
+        # graph_2d_cluster_single_image(graph, _start, 0.01, cluster_type)
+
+    
+    return INRSingle2dSamplerWrapper(
+        model=inr,
+        iters=0,
+        device=device,
+        sample_rate=cfg.sampling.rate,
+        sample_type=sampling_type,
+        save_samples_path=save_path,
+        n_clusters_2d_start=cfg.sampling.n_clusters_2d_start,
+        n_clusters_2d_end=cfg.sampling.n_clusters_2d_end,
+        epochs = cfg.optim.epochs,
+        image_width = image_width
+    )

@@ -338,6 +338,150 @@ def cell_grad_variance_estimate_with_jacrev(cell_cor_range, graph, inr, device, 
     grad_total_var_tensor = sigma_square * frobenius_norm**2
     return grad_total_var_tensor
 
+
+def cell_loss_variance_estimate_with_taylor(cell_cor_range, graph, inr, device, approx_last_layer=False) -> torch.Tensor:
+    """
+    Calculate per-cell loss variance using first-order Taylor expansion.
+
+    This keeps the same API/shape contract as
+    ``cell_grad_variance_estimate_with_jacrev`` while estimating variance of the
+    scalar loss in each cell:
+
+        Var[L(x)] ≈ grad_x(L)^T Cov[x] grad_x(L)
+
+    Under the same isotropic cell approximation used elsewhere in this file,
+    this becomes:
+
+        Var[L(x)] ≈ sigma_square * (dL/dx^2 + dL/dy^2)
+
+    where dL/dx and dL/dy are estimated with central finite differences using
+    4-neighbor losses around each cell center.
+
+    Args:
+        cell_cor_range: Tensor [N, 4] with (r_start, r_end, c_start, c_end)
+        graph: Graph object containing spatial embeddings and features
+        inr: INR model
+        device: Computation device
+        approx_last_layer: Kept for API compatibility; not used here.
+
+    Returns:
+        Tensor [N] containing Taylor-estimated loss variance per cell.
+    """
+    del approx_last_layer  # Intentionally unused; kept for signature compatibility.
+
+    graph = graph.cpu()
+    H = graph.cor.max().item() + 1
+    features = graph.feat.view(H, H, 1)
+    coords = graph.space_emb.view(H, H, 2)
+
+    coords_range = coords.max() - coords.min()
+    coords_step = coords_range / (H - 1)
+
+    inr.to(device)
+
+    # Cell centers from inclusive bounds [r0, r1, c0, c1]
+    r_indices = ((cell_cor_range[:, 0] + cell_cor_range[:, 1]) // 2).long()
+    c_indices = ((cell_cor_range[:, 2] + cell_cor_range[:, 3]) // 2).long()
+    width_tensor = cell_cor_range[:, 1] - cell_cor_range[:, 0]
+
+    # Build 4-neighbor tensors in the same order used by jacrev helper:
+    # [below, above, right, left] for each center.
+    neighbor_coords = []
+    neighbor_targets = []
+    i = 0
+    for r, c in zip(r_indices, c_indices):
+        neighbors = [
+            (r + 1, c),
+            (r - 1, c),
+            (r, c + 1),
+            (r, c - 1),
+        ]
+        for rr, cc in neighbors:
+            try:
+                neighbor_coords.append(coords[rr, cc])
+                neighbor_targets.append(features[rr, cc])
+            except IndexError:
+                print("IndexError for neighbor")
+                print(cell_cor_range[i])
+        i += 1
+
+    neighbor_coords = torch.stack(neighbor_coords, dim=0).to(device)    # [4N, 2]
+    neighbor_targets = torch.stack(neighbor_targets, dim=0).to(device)  # [4N, 1]
+
+    # Evaluate per-neighbor losses and recover [N, 4].
+    with torch.enable_grad():
+        recon = inr(neighbor_coords)
+        losses = loss_function(recon, neighbor_targets).reshape(-1)
+    losses_B4 = losses.view(-1, 4)
+
+    # Central differences for dL/dx and dL/dy.
+    dLdx = (losses_B4[:, 0] - losses_B4[:, 1]) / (2 * coords_step)
+    dLdy = (losses_B4[:, 2] - losses_B4[:, 3]) / (2 * coords_step)
+    loss_grad_norm_sq = dLdx.pow(2) + dLdy.pow(2)
+
+    width = coords_step * width_tensor
+    n = width_tensor + 1
+    sigma_square = (width**2 / 12 * (n + 1) / (n - 1)).to(device)
+
+    loss_var_tensor = sigma_square * loss_grad_norm_sq
+    return loss_var_tensor
+
+
+def cell_loss_variance_estimate_with_random_sampling(cell_cor_range, graph, inr, device, max_samples_per_cell=16, approx_last_layer=False) -> torch.Tensor:
+    """
+    Estimate per-cell loss variance by random sampling points inside each cell.
+
+    This function keeps the same signature and output shape contract as
+    ``cell_grad_variance_estimate_with_jacrev`` and
+    ``cell_loss_variance_estimate_with_taylor``.
+
+    For each cell [r_start, r_end, c_start, c_end] (inclusive), it samples
+    points uniformly at random inside the cell, evaluates per-point squared
+    loss, and returns the empirical variance per cell.
+
+    Args:
+        cell_cor_range: Tensor [N, 4] with (r_start, r_end, c_start, c_end)
+        graph: Graph object containing spatial embeddings and features
+        inr: INR model
+        device: Computation device
+        approx_last_layer: Kept for API compatibility; not used here.
+
+    Returns:
+        Tensor [N] containing empirical loss variances per cell.
+    """
+    del approx_last_layer  # Intentionally unused; kept for signature compatibility.
+
+    graph = graph.cpu()
+    H = graph.cor.max().item() + 1
+    features = graph.feat.view(H, H, 1)
+    coords = graph.space_emb.view(H, H, 2)
+
+    inr.to(device)
+
+    loss_var_list = []
+
+    for cell in cell_cor_range:
+        r_start, r_end, c_start, c_end = [int(v) for v in cell.tolist()]
+
+        h = r_end - r_start + 1
+        w = c_end - c_start + 1
+        n_samples = min(max_samples_per_cell, h * w)
+
+        rr = torch.randint(r_start, r_end + 1, (n_samples,))
+        cc = torch.randint(c_start, c_end + 1, (n_samples,))
+
+        sample_coords = coords[rr, cc].to(device)
+        sample_targets = features[rr, cc].to(device)
+
+        sample_recon = inr(sample_coords)
+        sample_losses = loss_function(sample_recon, sample_targets).reshape(-1)
+
+        # Use population variance to avoid NaN when n_samples==1.
+        loss_var_list.append(sample_losses.var(unbiased=False))
+
+    return torch.stack(loss_var_list, dim=0)
+
+
 def cell_grad_variance_estimate_with_norm_corrected(cell_cor_range:torch.Tensor, graph, inr, device, probes=500)-> torch.Tensor:
     """
     Partially batched gradient estimation.
@@ -734,6 +878,84 @@ def grad_win_batched(rc_tensor, width_tensor, graph, inr, device):
         grad_std_list.append(grad_std)
     
     return grad_std_list
+
+
+def test_cell_loss_variance_estimate_with_taylor(
+    graph,
+    inr,
+    device,
+    n_cells: int = 32,
+    seed: int = 0,
+    min_corr: float = 0.1,
+):
+    """
+    Verify the Taylor loss-variance estimator on random interior cells.
+
+    This test helper checks:
+    1) Output shape is [N]
+    2) Values are finite and non-negative
+    3) Estimates are positively correlated with loss-variance ground truth
+
+    Args:
+        graph: Graph object containing ``cor``, ``space_emb``, ``feat``
+        inr: INR model
+        device: Device for model execution
+        n_cells: Number of random cells to test
+        seed: RNG seed for reproducibility
+        min_corr: Minimum Pearson correlation required vs ground truth
+
+    Returns:
+        dict with verification metrics.
+
+    Raises:
+        AssertionError: If any verification check fails.
+    """
+    g = torch.Generator(device="cpu")
+    g.manual_seed(seed)
+
+    H = int(graph.cor.max().item()) + 1
+    # Keep centers away from image boundary because estimator uses 4-neighbor stencil.
+    r_centers = torch.randint(1, H - 1, (n_cells,), generator=g)
+    c_centers = torch.randint(1, H - 1, (n_cells,), generator=g)
+
+    max_half = max(1, min(8, (H - 3) // 2))
+    half_widths = torch.randint(1, max_half + 1, (n_cells,), generator=g)
+
+    r0 = torch.clamp(r_centers - half_widths, min=0)
+    r1 = torch.clamp(r_centers + half_widths, max=H - 1)
+    c0 = torch.clamp(c_centers - half_widths, min=0)
+    c1 = torch.clamp(c_centers + half_widths, max=H - 1)
+    cell_cor_range = torch.stack([r0, r1, c0, c1], dim=1)
+
+    est = cell_loss_variance_estimate_with_taylor(cell_cor_range, graph, inr, device)
+    gt = loss_variance_ground_truth(cell_cor_range, graph, inr, device)
+
+    assert est.dim() == 1 and est.shape[0] == n_cells, (
+        f"Expected est shape [{n_cells}], got {tuple(est.shape)}"
+    )
+    assert gt.dim() == 1 and gt.shape[0] == n_cells, (
+        f"Expected gt shape [{n_cells}], got {tuple(gt.shape)}"
+    )
+    assert torch.isfinite(est).all(), "Taylor loss variance contains non-finite values"
+    assert (est >= 0).all(), "Taylor loss variance should be non-negative"
+
+    est_cpu = est.detach().float().cpu()
+    gt_cpu = gt.detach().float().cpu()
+    est_centered = est_cpu - est_cpu.mean()
+    gt_centered = gt_cpu - gt_cpu.mean()
+    denom = est_centered.norm() * gt_centered.norm()
+    corr = 0.0 if denom.item() == 0 else float((est_centered * gt_centered).sum() / denom)
+
+    assert corr >= min_corr, (
+        f"Taylor estimator correlation too low: corr={corr:.4f}, min_corr={min_corr:.4f}"
+    )
+
+    return {
+        "n_cells": n_cells,
+        "corr": corr,
+        "est_mean": float(est_cpu.mean()),
+        "gt_mean": float(gt_cpu.mean()),
+    }
 
 
 

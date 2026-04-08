@@ -170,6 +170,67 @@ def solve_burgers2d(
     return np.stack(solutions, axis=0)  # (T_steps+1, H, W)
 
 
+def _is_finite_array(arr: np.ndarray) -> bool:
+    """Cheap helper to keep stability checks readable."""
+    return bool(np.isfinite(arr).all())
+
+
+def _solve_with_retries(
+    u0: np.ndarray,
+    nu: float,
+    dt: float,
+    T_steps: int,
+    dealias: bool,
+    substeps: int,
+    max_retries: int,
+    dt_shrink: float,
+    min_dt: float,
+    rms_shrink: float,
+) -> np.ndarray:
+    """
+    Solve one trajectory robustly by retrying with safer parameters when needed.
+
+    Retry strategy:
+      1) shrink internal dt for stability
+      2) if dt reaches floor, reduce IC amplitude
+    """
+    cur_dt = float(dt)
+    cur_u0 = u0.copy()
+    for attempt in range(max_retries + 1):
+        traj = solve_burgers2d(
+            cur_u0,
+            nu=nu,
+            dt=cur_dt,
+            T_steps=T_steps,
+            dealias=dealias,
+            substeps=substeps,
+        )
+        if _is_finite_array(traj):
+            return traj
+
+        if attempt == max_retries:
+            break
+
+        next_dt = max(min_dt, cur_dt * dt_shrink)
+        if next_dt < cur_dt:
+            print(
+                f"    [retry {attempt + 1}/{max_retries}] non-finite trajectory; "
+                f"shrinking dt {cur_dt:.3e} -> {next_dt:.3e}"
+            )
+            cur_dt = next_dt
+        else:
+            cur_u0 *= rms_shrink
+            print(
+                f"    [retry {attempt + 1}/{max_retries}] dt at floor {cur_dt:.3e}; "
+                f"shrinking IC amplitude by x{rms_shrink:.3f}"
+            )
+
+    raise RuntimeError(
+        "Trajectory remained non-finite after retries. "
+        f"nu={nu}, dt={dt}, min_dt={min_dt}, max_retries={max_retries}."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Dataset generation
 # ---------------------------------------------------------------------------
@@ -189,6 +250,13 @@ def generate_dataset(
     ic_target_rms: float,
     global_seed: int,
     dealias: bool,
+    max_retries: int,
+    dt_shrink: float,
+    min_dt: float,
+    rms_shrink: float,
+    overwrite: bool,
+    resume: bool,
+    flush_every: int,
 ) -> None:
     """Generate one HDF5 file per viscosity value and save to `out_dir`."""
     os.makedirs(out_dir, exist_ok=True)
@@ -200,38 +268,79 @@ def generate_dataset(
 
     for nu in nu_list:
         out_path = os.path.join(out_dir, f"2D_Burgers_Sols_Nu{nu}.hdf5")
-        if os.path.exists(out_path):
-            print(f"[skip] {out_path} already exists — delete to regenerate")
+        if os.path.exists(out_path) and not overwrite and not resume:
+            print(f"[skip] {out_path} already exists (use --overwrite or --resume)")
             continue
 
         print(f"Generating nu={nu}: {N_per_nu} samples, grid={H}x{W}, T={T_steps+1} ...")
-        tensor = np.empty((N_per_nu, T_steps + 1, H, W), dtype=np.float32)
 
-        for n in range(N_per_nu):
-            seed = global_seed + int(nu * 1e6) + n
-            rng = np.random.default_rng(seed)
-            u0 = _random_ic(
-                H,
-                W,
-                n_modes=n_modes,
-                rng=rng,
-                decay_power=ic_decay_power,
-                highfreq_boost=ic_highfreq_boost,
-                target_rms=ic_target_rms,
-            )
-            traj = solve_burgers2d(u0, nu=nu, dt=dt, T_steps=T_steps, dealias=dealias, substeps=substeps)
-            tensor[n] = traj  # (T+1, H, W)
+        write_mode = "w"
+        start_idx = 0
+        if os.path.exists(out_path) and overwrite:
+            os.remove(out_path)
+        elif os.path.exists(out_path) and resume:
+            write_mode = "r+"
 
-            if (n + 1) % 10 == 0:
-                print(f"  nu={nu}  sample {n+1}/{N_per_nu}")
+        with h5py.File(out_path, write_mode) as f:
+            if write_mode == "w":
+                chunk_shape = (1, 1, H, W)
+                tensor_ds = f.create_dataset(
+                    "tensor",
+                    shape=(N_per_nu, T_steps + 1, H, W),
+                    dtype=np.float32,
+                    compression="gzip",
+                    chunks=chunk_shape,
+                )
+                f.create_dataset("t-coordinate", data=t_coord)
+                f.create_dataset("x-coordinate", data=x_coord)
+                f.create_dataset("y-coordinate", data=y_coord)
+                f.attrs["completed_samples"] = 0
+            else:
+                tensor_ds = f["tensor"]
+                expected = (N_per_nu, T_steps + 1, H, W)
+                if tensor_ds.shape != expected:
+                    raise ValueError(
+                        f"Resume shape mismatch for {out_path}: "
+                        f"file has {tensor_ds.shape}, expected {expected}."
+                    )
+                start_idx = int(f.attrs.get("completed_samples", 0))
+                start_idx = min(max(start_idx, 0), N_per_nu)
+                print(f"  [resume] starting from sample {start_idx}/{N_per_nu}")
 
-        with h5py.File(out_path, "w") as f:
-            f.create_dataset("tensor",       data=tensor,   compression="gzip", chunks=True)
-            f.create_dataset("t-coordinate", data=t_coord)
-            f.create_dataset("x-coordinate", data=x_coord)
-            f.create_dataset("y-coordinate", data=y_coord)
+            for n in range(start_idx, N_per_nu):
+                seed = global_seed + int(nu * 1e6) + n
+                rng = np.random.default_rng(seed)
+                u0 = _random_ic(
+                    H,
+                    W,
+                    n_modes=n_modes,
+                    rng=rng,
+                    decay_power=ic_decay_power,
+                    highfreq_boost=ic_highfreq_boost,
+                    target_rms=ic_target_rms,
+                )
 
-        print(f"  Saved {out_path}  shape={tensor.shape}")
+                traj = _solve_with_retries(
+                    u0,
+                    nu=nu,
+                    dt=dt,
+                    T_steps=T_steps,
+                    dealias=dealias,
+                    substeps=substeps,
+                    max_retries=max_retries,
+                    dt_shrink=dt_shrink,
+                    min_dt=min_dt,
+                    rms_shrink=rms_shrink,
+                )
+
+                tensor_ds[n] = traj
+                f.attrs["completed_samples"] = n + 1
+
+                if ((n + 1) % flush_every == 0) or (n + 1 == N_per_nu):
+                    f.flush()
+                    print(f"  nu={nu}  sample {n+1}/{N_per_nu}")
+
+        print(f"  Saved {out_path}  shape={(N_per_nu, T_steps + 1, H, W)}")
 
 
 # ---------------------------------------------------------------------------
@@ -276,11 +385,61 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--seed",       type=int,   default=42,    help="Global base random seed")
     parser.add_argument("--no_dealias", action="store_true",       help="Disable 2/3 de-aliasing")
+    parser.add_argument(
+        "--nu_list",
+        nargs="+",
+        type=float,
+        default=None,
+        help="Optional explicit viscosity list, e.g. --nu_list 0.001 0.002",
+    )
+    parser.add_argument("--overwrite", action="store_true", help="Overwrite existing output files")
+    parser.add_argument("--resume", action="store_true", help="Resume generation from existing files")
+    parser.add_argument(
+        "--flush_every",
+        type=int,
+        default=1,
+        help="Flush HDF5 file every N samples (smaller is safer for long runs)",
+    )
+    parser.add_argument(
+        "--max_retries",
+        type=int,
+        default=4,
+        help="Max retries per sample when non-finite values are detected",
+    )
+    parser.add_argument(
+        "--dt_shrink",
+        type=float,
+        default=0.5,
+        help="Retry multiplier for dt after instability (0 < dt_shrink < 1)",
+    )
+    parser.add_argument(
+        "--min_dt",
+        type=float,
+        default=1e-5,
+        help="Lower bound for dt during retry shrink",
+    )
+    parser.add_argument(
+        "--rms_shrink",
+        type=float,
+        default=0.8,
+        help="If dt is already at min_dt, multiply IC amplitude by this factor",
+    )
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = _parse_args()
+
+    if args.flush_every < 1:
+        raise ValueError("--flush_every must be >= 1")
+    if not (0.0 < args.dt_shrink < 1.0):
+        raise ValueError("--dt_shrink must satisfy 0 < dt_shrink < 1")
+    if not (0.0 < args.rms_shrink < 1.0):
+        raise ValueError("--rms_shrink must satisfy 0 < rms_shrink < 1")
+    if args.min_dt <= 0.0:
+        raise ValueError("--min_dt must be > 0")
+    if args.resume and args.overwrite:
+        raise ValueError("Use either --resume or --overwrite, not both")
 
     # Train viscosities (5 values) + validation (1) + test (1)
     train_nu = (0.001, 0.002, 0.005, 0.02, 0.05)
@@ -291,7 +450,11 @@ if __name__ == "__main__":
 
     # Flatten to a single list; for shared nu (e.g. nu=0.002 in both train & test)
     # we generate the larger count so all index ranges are covered.
-    unique_nu = sorted(set(list(train_nu) + list(val_nu) + list(test_nu)))
+    if args.nu_list is not None:
+        unique_nu = sorted(set(args.nu_list))
+    else:
+        unique_nu = sorted(set(list(train_nu) + list(val_nu) + list(test_nu)))
+
     generate_dataset(
         out_dir=args.out_dir,
         nu_list=unique_nu,
@@ -307,5 +470,12 @@ if __name__ == "__main__":
         ic_target_rms=args.ic_target_rms,
         global_seed=args.seed,
         dealias=not args.no_dealias,
+        max_retries=args.max_retries,
+        dt_shrink=args.dt_shrink,
+        min_dt=args.min_dt,
+        rms_shrink=args.rms_shrink,
+        overwrite=args.overwrite,
+        resume=args.resume,
+        flush_every=args.flush_every,
     )
     print("Done.")

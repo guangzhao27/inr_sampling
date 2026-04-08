@@ -15,3 +15,5 @@ __pycache__/
 /Results/*
 /.github/*
 /outputs/*
+/data/*
+/checkpoints/*

@@ -733,6 +733,175 @@ def create_burgers2d_dataset(
     )
 
 
+class GraphPoolBoiling2D(Dataset):
+    """
+    Graph dataset for PoolBoiling 2D trajectories stored in HDF5 files.
+
+    Expected per-file layout:
+      - temperature: (T, H, W) preferred
+      - or an equivalent 4D tensor (N, T, H, W)
+    """
+
+    def __init__(
+        self,
+        file_path,
+        field_key="temperature",
+        latent_dim=256,
+        ssub=1,
+        missing_rate=0.0,
+        sample_idx=0,
+    ):
+        super().__init__()
+        self.file_path = file_path
+        self.field_key = field_key
+        self.latent_dim = latent_dim
+        self.ssub = ssub
+        self.missing_rate = missing_rate
+
+        with h5py.File(file_path, "r") as f:
+            if field_key not in f:
+                raise KeyError(
+                    f"Missing key '{field_key}' in {file_path}. Available keys: {list(f.keys())}"
+                )
+            raw = f[field_key][:]
+
+        if raw.ndim == 3:
+            raw = raw[None, ...]  # (N=1, T, H, W)
+        elif raw.ndim != 4:
+            raise ValueError(
+                f"Expected '{field_key}' with 3 or 4 dims, got shape {raw.shape} from {file_path}"
+            )
+
+        if sample_idx is not None:
+            if sample_idx < 0 or sample_idx >= raw.shape[0]:
+                raise IndexError(
+                    f"sample_idx={sample_idx} out of range for {file_path} with N={raw.shape[0]}"
+                )
+            raw = raw[sample_idx : sample_idx + 1]
+
+        raw = raw[:, :, ::ssub, ::ssub]
+        tensor = torch.from_numpy(raw.copy()).float()  # (N, T, H, W)
+
+        self.height = tensor.size(2)
+        self.width = tensor.size(3)
+        self.T = tensor.size(1)
+
+        x_coords, y_coords = torch.meshgrid(
+            torch.arange(self.height, dtype=torch.float32),
+            torch.arange(self.width, dtype=torch.float32),
+            indexing="ij",
+        )
+        x_coords = 2.0 * x_coords / (self.width - 1) - 1.0
+        y_coords = 2.0 * y_coords / (self.height - 1) - 1.0
+        self.spatial_grid = torch.stack([x_coords, y_coords], dim=-1)  # (H, W, 2)
+
+        self.dataset = self._build_dataset(tensor)
+
+    def _build_dataset(self, tensor):
+        dataset = {}
+        N, T, H, W = tensor.shape
+
+        for n in range(N):
+            cor_list = []
+            feat_list = []
+            time_list = []
+            emb_list = []
+
+            for t in range(T):
+                if self.missing_rate > 0:
+                    mask_t = torch.rand(H, W) > self.missing_rate
+                else:
+                    mask_t = torch.ones(H, W, dtype=torch.bool)
+
+                cor_t = mask_t.nonzero(as_tuple=False)
+                feat_t = tensor[n, t][mask_t].reshape(-1, 1)
+                time_t = torch.full((len(cor_t),), t, dtype=torch.long)
+                emb_t = self.spatial_grid[cor_t[:, 0], cor_t[:, 1]]
+
+                cor_list.append(cor_t)
+                feat_list.append(feat_t)
+                time_list.append(time_t)
+                emb_list.append(emb_t)
+
+            datapoint = Data(
+                cor=torch.cat(cor_list, dim=0),
+                feat=torch.cat(feat_list, dim=0),
+                time=torch.cat(time_list, dim=0),
+                space_emb=torch.cat(emb_list, dim=0),
+                T=torch.tensor(T),
+                latent_vector=torch.zeros(T, self.latent_dim),
+            )
+            dataset[str(n)] = datapoint
+
+        return dataset
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, key):
+        return self.dataset[str(key)]
+
+
+def create_poolboiling2d_dataset(
+    data_dir,
+    latent_dim=256,
+    space_factor=1,
+    seed=42,
+    single_image=True,
+    sample_idx=0,
+    field_key="temperature",
+    condition=100,
+    file_name=None,
+):
+    """
+    Create a PoolBoiling 2D graph dataset from Twall-*.hdf5 files.
+
+    Args:
+        data_dir: directory containing Twall-*.hdf5 files, or a specific file path.
+        latent_dim: latent vector width.
+        space_factor: spatial subsampling stride.
+        seed: reserved for future split behavior.
+        single_image: only True is supported in current single-image INR flow.
+        sample_idx: sample index when source tensor is 4D (N, T, H, W).
+        field_key: HDF5 key to read, e.g. "temperature".
+        condition: wall temperature suffix used when selecting default file.
+        file_name: optional explicit filename (e.g. "Twall-100.hdf5").
+    """
+    del seed  # reserved for future split support
+
+    if os.path.isfile(data_dir):
+        file_path = data_dir
+    else:
+        if file_name is not None:
+            file_path = os.path.join(data_dir, file_name)
+        else:
+            file_path = os.path.join(data_dir, f"Twall-{condition}.hdf5")
+
+        if not os.path.exists(file_path):
+            candidates = sorted(glob.glob(os.path.join(data_dir, "Twall-*.hdf5")))
+            if not candidates:
+                raise FileNotFoundError(
+                    f"No PoolBoiling files found in {data_dir}. Expected Twall-*.hdf5"
+                )
+            raise FileNotFoundError(
+                f"Could not find {file_path}. Available files: {[os.path.basename(c) for c in candidates]}"
+            )
+
+    if not single_image:
+        raise NotImplementedError(
+            "create_poolboiling2d_dataset currently supports single_image=True only"
+        )
+
+    return GraphPoolBoiling2D(
+        file_path=file_path,
+        field_key=field_key,
+        latent_dim=latent_dim,
+        ssub=space_factor,
+        missing_rate=0.0,
+        sample_idx=sample_idx,
+    )
+
+
 def get_graph_t_idx(graph, t) -> torch.Tensor:
     indices_t = (graph.time == t).nonzero(as_tuple=True)[0]
     # print("graph time in get_graph_t_idx\n", str(t))

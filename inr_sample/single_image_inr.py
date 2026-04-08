@@ -25,6 +25,7 @@ from utils.data.unstructure_dataset import (
     get_graph_t_idx,
     create_ns_dataset,
     create_burgers2d_dataset,
+    create_poolboiling2d_dataset,
 )
 from train_utility_sampling.train_utility import (
     train_step, 
@@ -88,18 +89,11 @@ def create_inr_sampler(cfg, inr, graph, current_date_str, run_name, device='cuda
     if sampling_type is None:
         return None
 
-    # Map special 2d_cluster types to a unified sampler_name + cluster_type
-    cluster_map = {
-        '2d_cluster_slic': 'slic',
-        '2d_grid_linear': 'grid',
-    }
-
-    if sampling_type in cluster_map:
-        sampler_name = '2d_cluster'
-        cluster_type = cluster_map[sampling_type]
-        # Run your graph clustering side-effect for a single image
+    # Precompute SLIC clusters once for the slic sampler.
+    if sampling_type == "2d_cluster_slic":
         _start = cfg.sampling.n_clusters_2d_start
-        graph_2d_cluster_single_image(graph, _start, 0.01, cluster_type)
+        graph_2d_cluster_single_image(graph, _start, 0.01, "slic")
+        sampler_name = sampling_type
     elif sampling_type == "2d_grid_adaptive":
         save_path = f'./sampled_frames/{current_date_str + run_name}'
         return INRSingle2dAdaptiveSamplerWrapper(
@@ -169,6 +163,21 @@ def _build_trainset(cfg, latent_dim, data_path, dataset_name, data_type, seed, s
             alpha=cfg.data.piecewise_alpha,
             beta=cfg.data.piecewise_beta,
             eps=cfg.data.piecewise_eps if cfg.data.piecewise_eps else None,
+        )
+        feat_transform, feat_inv_transform = None, None
+    elif dataset_name == "PoolBoiling2D":
+        input_dim = 2
+        output_dim = 1
+        trainset = create_poolboiling2d_dataset(
+            data_dir=data_path,
+            latent_dim=latent_dim,
+            space_factor=space_factor,
+            seed=seed,
+            single_image=True,
+            sample_idx=cfg.data.get("poolboiling_sample_idx", 0),
+            field_key=cfg.data.get("poolboiling_key", "temperature"),
+            condition=cfg.data.get("poolboiling_condition", 100),
+            file_name=cfg.data.get("poolboiling_file", None),
         )
         feat_transform, feat_inv_transform = None, None
     else:

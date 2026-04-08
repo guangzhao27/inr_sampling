@@ -26,6 +26,9 @@ data:
   #                                      2D_Burgers_Sols_Nu{nu}.hdf5 files
   #                                      (generate with: python utils/data/generate_burgers2d.py)
   #                                      e.g. /pscratch/sd/g/gzhao27/INR/data
+  #   PoolBoiling2D : pool-boiling CFD -- data_path = directory containing
+  #                                      Twall-*.hdf5 files, field_key defaults to
+  #                                      "temperature" with shape (T, H, W)
   #   Piecewise2D : synthetic 2D piecewise function (in-memory, no disk needed)
   #                 f(x,y) = sin(2πx) + beta * I(y>0.5) * sin(2π·alpha·y)
   #                 configure with piecewise_* keys below
@@ -47,6 +50,11 @@ data:
   # Burgers2D runtime options (used when dataset_name = Burgers2D)
   burgers2d_nu: 0.01          # selects file 2D_Burgers_Sols_Nu{nu}.hdf5
   burgers2d_sample_idx: 0     # selects trajectory index within tensor[N, T, H, W]
+  # PoolBoiling2D runtime options (used when dataset_name = PoolBoiling2D)
+  poolboiling_condition: 100   # default file selector: Twall-{condition}.hdf5
+  poolboiling_file:            # optional explicit file name, e.g. Twall-100.hdf5
+  poolboiling_key: temperature # HDF5 field key for supervision target
+  poolboiling_sample_idx: 0    # only used when selected field has shape [N, T, H, W]
   # Piecewise2D dataset parameters (only used when dataset_name = Piecewise2D)
   piecewise_resolution: 1024   # grid size H = W = resolution
   piecewise_alpha: 20.0       # high-frequency multiplier in y (right half, x > 0.5)

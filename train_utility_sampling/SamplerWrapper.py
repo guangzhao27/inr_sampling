@@ -638,6 +638,7 @@ class INRSingle2dSamplerWrapper(InrSamplerWrapper):
             self._save_sample_images(graph, sampled_graph, dif=dif)
         return sampled_graph.to(self.device)
 
+
 class INRSingle2dAdaptiveSamplerWrapper(InrSamplerWrapper):
     def __init__(
         self, 
@@ -662,6 +663,7 @@ class INRSingle2dAdaptiveSamplerWrapper(InrSamplerWrapper):
         
         # Store graph reference for evaluation function
         self.cached_graph = None
+    
     
     def _create_evaluation_function(self, graph: Data, mode: str = 'gradient'):
         """
@@ -707,7 +709,7 @@ class INRSingle2dAdaptiveSamplerWrapper(InrSamplerWrapper):
             
                 return weighted_std.tolist()
             
-            if mode == 'loss':
+            if mode == 'losstrue':
                 loss_variance = loss_variance_ground_truth(
                     cell_coords_tensor, graph, self.model, self.device
                 )
@@ -716,6 +718,8 @@ class INRSingle2dAdaptiveSamplerWrapper(InrSamplerWrapper):
                 return cell_value.tolist()
         
         return evaluate_cells
+    
+    
     def sample(
         self, 
         inner_step: int,
@@ -797,6 +801,7 @@ class INRSingle2dAdaptiveSamplerWrapper(InrSamplerWrapper):
         
         return sampled_graph.to(self.device)
 
+
 # 2d cluster sampler
 def graph_2d_cluster_single_image(graph, n_segments, compactness=1, cluster_type='slic'):
     T = graph.T.sum()
@@ -855,6 +860,7 @@ def graph_2d_cluster_single_image(graph, n_segments, compactness=1, cluster_type
             mask = segments_flat == i
             graph.cluster_set[t][i] = mask.nonzero(as_tuple=True)[0]
         graph.segments[t] = segments
+
 
 class EVOSSampler:
     def __init__(self, cfg, img, graph):

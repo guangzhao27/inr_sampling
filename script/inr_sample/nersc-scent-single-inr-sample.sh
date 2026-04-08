@@ -63,7 +63,7 @@ conda activate torchgeo
 #         data.single_time_frame=${time_frame}
 #   done
 # done
-lr=1e-3 # 5.6e-5 non full 
+lr=5e-4 # 5.6e-5 non full 
 for time_frame in 100 120 140 160 180 200; do
   for sample_type in null; do
     run_name="NS1024_single_${sample_type}_re_${re}_sampling_${sampling_rate}_lr_${lr}_depth_${depth}_t${time_frame}"

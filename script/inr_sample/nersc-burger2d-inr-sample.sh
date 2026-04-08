@@ -12,10 +12,10 @@ source ~/anaconda3/etc/profile.d/conda.sh
 conda activate torchgeo
 
 w0=30
-sampling_rate=2e-3
+sampling_rate=2e-4
 train_ratio=1
 inner_steps=6
-lr=1e-3 # 5.6e-5 non full 
+lr=1e-4 # 5.6e-5 non full 
 depth=6
 n_start=11
 n_finish=128
@@ -33,7 +33,7 @@ burgers2d_sample_idx=0
 # for time_frame in 100 120 140 160 180 200; do
 #   for sample_type in NMT random 2d_grid_linear EVOS; do
 for time_frame in 25; do
-  for sample_type in null NMT random 2d_cluster_slic 2d_grid_linear EVOS; do
+  for sample_type in NMT random 2d_grid_linear EVOS; do
     run_name="dataset_${dataset_name}_sample_${burgers2d_sample_idx}_${sample_type}_sampling_${sampling_rate}_lr_${lr}_depth_${depth}_t${time_frame}"
     python /pscratch/sd/g/gzhao27/INR/INR_SAMPLE/inr_sample/single_image_inr.py \
         data.dataset_name=$dataset_name \
@@ -68,6 +68,7 @@ for time_frame in 25; do
   done
 done
 
+lr=1e-3
 
 # data_type: mmap or other
 

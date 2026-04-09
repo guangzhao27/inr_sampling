@@ -7,7 +7,10 @@
 #SBATCH --gpus-per-node=1
 #SBATCH --account=m2956_g
 
-cd /pscratch/sd/g/gzhao27/INR/INR_SAMPLE/script/
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+
+cd "$REPO_ROOT"
 source ~/anaconda3/etc/profile.d/conda.sh
 conda activate torchgeo
 
@@ -21,9 +24,6 @@ n_start=11
 n_finish=128
 sample_type=NMT
 time_frame=200
-cd /pscratch/sd/g/gzhao27/INR/SOMA/
-source ~/anaconda3/etc/profile.d/conda.sh
-conda activate torchgeo
 dataset_name=Piecewise2D
 # dataset name choices: Piecewise2D, NS2d, NS2d_inhom, NS2d_incom, NS2d_incom_inhom
 
@@ -33,7 +33,7 @@ dataset_name=Piecewise2D
 for time_frame in 100; do
   for sample_type in null NMT random 2d_grid_linear EVOS; do
     run_name="dataset_${dataset_name}_${sample_type}_sampling_${sampling_rate}_lr_${lr}_depth_${depth}_t${time_frame}"
-    python /pscratch/sd/g/gzhao27/INR/INR_SAMPLE/inr_sample/single_image_inr.py \
+    python inr_sample/single_image_inr.py \
         data.dataset_name=$dataset_name \
         inr.model_type=siren \
         data.space_factor=1 \

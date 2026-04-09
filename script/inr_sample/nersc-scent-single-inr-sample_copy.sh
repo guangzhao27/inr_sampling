@@ -28,11 +28,11 @@ re=10000
 # Available samplers: null NMT random 2d_cluster_slic 2d_grid_linear EVOS
 DATA_PATH="${DATA_PATH:-${REPO_ROOT}/data/NS2d/ns_data_res2048_re${re}_7.npy}"
 use_weight_function=true # only used by sampling.type=2d_grid_linear_weighted
-
+data_path="/pscratch/sd/g/gzhao27/INR/INR_SAMPLE/data/NS2d/ns_data_res2048_re${re}_7.npy"
 # for time_frame in 100 120 140 160 180 200; do
 #   for sample_type in NMT random 2d_grid_linear EVOS; do
 for time_frame in 100; do
-  for sample_type in 2d_grid_linear_weighted 2d_grid_linear; do
+  for sample_type in random; do
     for use_weight_function in false true; do
       run_name="NS1024_single_${sample_type}_re_${re}_sampling_${sampling_rate}_lr_${lr}_depth_${depth}_t${time_frame}_weight_${use_weight_function}"
 
@@ -61,7 +61,7 @@ for time_frame in 100; do
           sampling.n_clusters_2d_end=$n_finish \
           sampling.n_clusters_2d_start=$n_start \
           "data.split_ratios=[${train_ratio}, 0.01, 0.01]" \
-          data.data_path=/pscratch/sd/g/gzhao27/INR/INR_SAMPLE/data/NS2d/ns_data_res2048_re${re}_7.npy\
+          data.data_path=$data_path \
           data.data_type=other \
           data.single_time_frame=${time_frame}
   done
@@ -72,7 +72,7 @@ done
 #   for sample_type in null; do
 #     run_name="NS1024_single_${sample_type}_re_${re}_sampling_${sampling_rate}_lr_${lr}_depth_${depth}_t${time_frame}"
 
-#     python /pscratch/sd/g/gzhao27/INR/INR_SAMPLE/inr_sample/single_image_inr.py \
+#     python inr_sample/single_image_inr.py \
 #         data.dataset_name=NS \
 #         inr.model_type=siren \
 #         data.space_factor=1 \
@@ -98,7 +98,7 @@ done
 #         sampling.n_clusters_2d_end=$n_finish \
 #         sampling.n_clusters_2d_start=$n_start \
 #         "data.split_ratios=[${train_ratio}, 0.01, 0.01]" \
-#         data.data_path=/pscratch/sd/g/gzhao27/INR/INR_SAMPLE/data/NS2d/ns_data_res2048_re${re}_7.npy\
+#         data.data_path=$data_path \
 #         data.data_type=other \
 #         data.single_time_frame=${time_frame}
 #   done

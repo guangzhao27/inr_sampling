@@ -10,8 +10,9 @@
 source ~/anaconda3/etc/profile.d/conda.sh
 conda activate torchgeo
 
-repo_root=/pscratch/sd/g/gzhao27/INR/INR_SAMPLE
-cd "$repo_root"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+cd "$REPO_ROOT"
 
 w0=30
 sampling_rate=1e-3
@@ -23,15 +24,15 @@ n_start=11
 n_finish=128
 condition=100
 field_key=temperature
-
+data_path="/pscratch/sd/g/gzhao27/INR/INR_SAMPLE/data/PoolBoiling-SubCooled-FC72-2D"
 # sampling choices: null random NMT 2d_grid_linear EVOS
 for time_frame in 40 80 120 160 200; do
   for sample_type in random NMT 2d_grid_linear EVOS; do
     run_name="PoolBoiling2D_single_${sample_type}_Twall_${condition}_sampling_${sampling_rate}_lr_${lr}_depth_${depth}_t${time_frame}"
 
-    python "$repo_root/inr_sample/single_image_inr.py" \
+    python inr_sample/single_image_inr.py \
       data.dataset_name=PoolBoiling2D \
-      data.data_path="$repo_root/data/PoolBoiling-SubCooled-FC72-2D" \
+      data.data_path="$data_path" \
       data.poolboiling_condition=$condition \
       data.poolboiling_key=$field_key \
       data.poolboiling_sample_idx=0 \
@@ -68,9 +69,9 @@ lr=5e-4
 for time_frame in 40 80 120 160 200; do
   for sample_type in null; do
     run_name="PoolBoiling2D_single_${sample_type}_Twall_${condition}_sampling_${sampling_rate}_lr_${lr}_depth_${depth}_t${time_frame}"
-    python "$repo_root/inr_sample/single_image_inr.py" \
+    python inr_sample/single_image_inr.py \
       data.dataset_name=PoolBoiling2D \
-      data.data_path="$repo_root/data/PoolBoiling-SubCooled-FC72-2D" \
+      data.data_path="$data_path" \
       data.poolboiling_condition=$condition \
       data.poolboiling_key=$field_key \
       data.poolboiling_sample_idx=0 \

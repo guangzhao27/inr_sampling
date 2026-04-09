@@ -8,6 +8,7 @@ from skimage.segmentation import slic
 from collections import defaultdict
 import math
 import torch.nn.functional as F
+from typing import Optional
 
 from utils.data.unstructure_dataset import get_graph_t_idx
 from util.misc import fix_seed
@@ -16,6 +17,7 @@ from components.nmt import mt_scheduler_factory
 from components.transform import Transform
 from utils.quadtree import HierarchicalImageGrid, ImageCell
 from train_utility_sampling.taylor_estimation import (
+    cell_loss_variance_estimate_with_random_sampling,
     grad_variance_ground_truth,
     cell_grad_variance_estimate_with_norm_corrected,
     cell_grad_variance_estimate_with_jacrev,
@@ -596,30 +598,6 @@ class INRSingle2dSamplerWrapper(InrSamplerWrapper):
                         sampling_weight = torch.ones_like(sampling_weight)
             dif = None
             
-        elif self.sample_type == "2d_grid_adaptive":
-            
-            grid = HierarchicalImageGrid(1024, 1024, initial_grid_size=32)
-            evaluation_function = lambda x: cell_grad_variance_estimate_with_jacrev(x, graph, self.model, self.device)
-            grid.iterative_subdivision(evaluation_function, iterations=5, percentage=11)
-            bounds, cell_size, _ = grid.get_leaf_properties_tensor()
-            cell_num = bounds.shape[0]
-            n_per_cell = max(1, math.ceil(n_samples / cell_num))
-            cor = sample_multiple_from_2d_intervals(bounds, n_per_cell)
-            x_coords = cor[:, :, 0]  # x-coordinates
-            y_coords = cor[:, :, 1]  # y-coordinates
-            rough_idx = (y_coords * self.image_width + x_coords).flatten().to(self.device)
-            # space_emb = graph.space_emb[rough_idx].to(self.device)  # [N_rough, D]
-            # feats = graph.feat[rough_idx].to(self.device)  # [N_rough, F]
-            # print(" time for 2d_cluster sampling rough idx: ", str(time()-t0))
-            # t0 = time()
-            # with torch.no_grad():
-            #     preds = self.model(space_emb)
-            #     dif = torch.sum((feats - preds).abs(), dim=1)
-            # n_samples = min(n_samples, len(dif))
-            # _, topk_local = torch.topk(dif, n_samples)
-            # random select n_samples from rough_idx
-            sampled_idx = rough_idx[torch.randperm(len(rough_idx), device=self.device)[:n_samples]]
-            
             # sampled_idx = rough_idx[topk_local]
             
             
@@ -698,6 +676,9 @@ class INRSingle2dAdaptiveSamplerWrapper(InrSamplerWrapper):
         iters: int, 
         device: str = "cuda:0",
         sample_rate: float = 0.5,
+        mode: str = "loss",
+        grid_update_interval: int = 100,
+        adaptive_update_values_each_step: bool = True,
         save_samples_path: Path = Path("logs/sampling"),
         save_interval: int = 100,
         image_width: int = 512,
@@ -712,9 +693,57 @@ class INRSingle2dAdaptiveSamplerWrapper(InrSamplerWrapper):
             save_interval=save_interval,
             image_width=image_width,    
         )
+        self.mode = mode
+        self.grid_update_interval = max(1, int(grid_update_interval))
+        self.adaptive_update_values_each_step = bool(adaptive_update_values_each_step)
         
         # Store graph reference for evaluation function
         self.cached_graph = None
+        self.cached_grid: Optional[HierarchicalImageGrid] = None
+        self.last_grid_update_step: Optional[int] = None
+        self.cached_bounds: Optional[torch.Tensor] = None
+        self.cached_cell_sizes: Optional[torch.Tensor] = None
+        self.cached_values: Optional[torch.Tensor] = None
+
+    def _should_refresh_grid(self, inner_step: int) -> bool:
+        """Refresh adaptive grid on first use and every `grid_update_interval` steps."""
+        if self.cached_grid is None or self.last_grid_update_step is None:
+            return True
+        return (inner_step - self.last_grid_update_step) >= self.grid_update_interval
+
+    def _refresh_leaf_properties(
+        self,
+        grid: HierarchicalImageGrid,
+        eval_fn,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Compute and cache leaf bounds/areas/values for later reuse."""
+        bounds, cell_sizes, values = grid.get_leaf_properties_tensor(
+            evaluation_function=eval_fn,
+            device=self.device,
+        )
+        self.cached_bounds = bounds
+        self.cached_cell_sizes = cell_sizes
+        self.cached_values = values
+        return bounds, cell_sizes, values
+
+    def _get_leaf_properties(
+        self,
+        grid: HierarchicalImageGrid,
+        eval_fn,
+        refresh_grid: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Return leaf properties, optionally reusing cached values between grid updates."""
+        if refresh_grid or self.adaptive_update_values_each_step:
+            return self._refresh_leaf_properties(grid, eval_fn)
+
+        if (
+            self.cached_bounds is None
+            or self.cached_cell_sizes is None
+            or self.cached_values is None
+        ):
+            return self._refresh_leaf_properties(grid, eval_fn)
+
+        return self.cached_bounds, self.cached_cell_sizes, self.cached_values
     
     
     def _create_evaluation_function(self, graph: Data, mode: str = 'gradient'):
@@ -761,13 +790,23 @@ class INRSingle2dAdaptiveSamplerWrapper(InrSamplerWrapper):
             
                 return weighted_std.tolist()
             
-            if mode == 'losstrue':
+            if mode == 'loss_true':
                 loss_variance = loss_variance_ground_truth(
                     cell_coords_tensor, graph, self.model, self.device
                 )
                 
                 cell_value = loss_variance.sqrt() * cell_areas_tensor
                 return cell_value.tolist()
+            
+            if mode == 'loss':
+                loss_variance = cell_loss_variance_estimate_with_random_sampling(
+                    cell_coords_tensor, graph, self.model, self.device
+                )
+                
+                cell_value = loss_variance.sqrt() * cell_areas_tensor
+                return cell_value.tolist()
+
+            raise ValueError(f"Unknown adaptive evaluation mode: {mode}")
         
         return evaluate_cells
     
@@ -777,7 +816,6 @@ class INRSingle2dAdaptiveSamplerWrapper(InrSamplerWrapper):
         inner_step: int,
         graph: Data,
         save_image: bool = False,
-        mode: str = 'loss',
         ) -> Data:
         """
         Adaptive sampling: decide cell sizes based on gradient variance estimation,
@@ -794,23 +832,32 @@ class INRSingle2dAdaptiveSamplerWrapper(InrSamplerWrapper):
         n_t = graph.cor.shape[0]
         n_samples = max(int(n_t * self.sample_rate), 1)
         
-        # Create adaptive grid with gradient-based subdivision
-        
-        grid = HierarchicalImageGrid(self.image_width, self.image_width, initial_grid_size=16)
-        
         # Create evaluation function with graph context
-        eval_fn = self._create_evaluation_function(graph, mode=mode)
+        eval_fn = self._create_evaluation_function(graph, mode=self.mode)
         
-        # Perform adaptive subdivision based on gradient variance
-        grid.iterative_subdivision(
-            eval_fn, 
-            iterations=5, 
-            percentage=10, 
-            batch_mode=True
-        )
+        # Rebuild/subdivide the adaptive grid only periodically.
+        refresh_grid = self._should_refresh_grid(inner_step)
+        if refresh_grid:
+            grid = HierarchicalImageGrid(self.image_width, self.image_width, initial_grid_size=16)
+            grid.iterative_subdivision(
+                eval_fn,
+                iterations=5,
+                percentage=10,
+                batch_mode=True,
+            )
+            self.cached_grid = grid
+            self.last_grid_update_step = inner_step
+        else:
+            if self.cached_grid is None:
+                raise RuntimeError("Adaptive grid cache is empty when attempting to reuse it.")
+            grid = self.cached_grid
         
         # Get cell boundaries and sample from each cell
-        bounds, cell_sizes, values = grid.get_leaf_properties_tensor(evaluation_function=eval_fn, device=self.device)
+        bounds, cell_sizes, values = self._get_leaf_properties(
+            grid,
+            eval_fn,
+            refresh_grid=refresh_grid,
+        )
         
         counts = sample_counts_poisson(values, expected_total=n_samples)
         n_cells = bounds.shape[0]
@@ -1432,6 +1479,9 @@ def create_inr_sampler(cfg, inr, graph, current_date_str, run_name, device='cuda
             iters=0,
             device=device,
             sample_rate=cfg.sampling.rate,
+            mode=cfg.sampling.get("adaptive_mode", "loss"),
+            grid_update_interval=cfg.sampling.get("adaptive_grid_update_interval", 100),
+            adaptive_update_values_each_step=cfg.sampling.get("adaptive_update_values_each_step", True),
             save_samples_path=save_path,
             image_width = image_width
         )

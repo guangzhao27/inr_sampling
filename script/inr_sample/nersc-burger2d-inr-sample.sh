@@ -7,7 +7,10 @@
 #SBATCH --gpus-per-node=1
 #SBATCH --account=m2956_g
 
-cd /pscratch/sd/g/gzhao27/INR/INR_SAMPLE/script/
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+
+cd "$REPO_ROOT"
 source ~/anaconda3/etc/profile.d/conda.sh
 conda activate torchgeo
 
@@ -21,9 +24,6 @@ n_start=11
 n_finish=128
 sample_type=NMT
 time_frame=200
-cd /pscratch/sd/g/gzhao27/INR/SOMA/
-source ~/anaconda3/etc/profile.d/conda.sh
-conda activate torchgeo
 dataset_name=Burgers2D
 data_path=/pscratch/sd/g/gzhao27/INR/data/2D_Burgers_Sols_Nu0.001.hdf5
 burgers2d_sample_idx=0
@@ -35,7 +35,7 @@ burgers2d_sample_idx=0
 for time_frame in 25; do
   for sample_type in NMT random 2d_grid_linear EVOS; do
     run_name="dataset_${dataset_name}_sample_${burgers2d_sample_idx}_${sample_type}_sampling_${sampling_rate}_lr_${lr}_depth_${depth}_t${time_frame}"
-    python /pscratch/sd/g/gzhao27/INR/INR_SAMPLE/inr_sample/single_image_inr.py \
+    python inr_sample/single_image_inr.py \
         data.dataset_name=$dataset_name \
       data.data_path=$data_path \
         data.burgers2d_sample_idx=$burgers2d_sample_idx \

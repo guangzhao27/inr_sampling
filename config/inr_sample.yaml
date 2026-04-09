@@ -14,7 +14,7 @@ saved_checkpoint : False
 checkpoint_path :
 
 data:
-  data_path: "/pscratch/sd/g/gzhao27/INR/data/NS2d/ns_mmap"
+  data_path: "./data/NS2d/ns_mmap"
   data_type: mmap
   mmap_dir: '/pscratch/sd/g/gzhao27/INR/SOMA/results/soma_mmap_save'
   dataset_name: "NS"
@@ -109,6 +109,7 @@ wandb:
 sampling:
   type: "random"
   rate: 0.2
+  use_weight_function: True          # only used by sampling.type=2d_grid_linear_weighted
   n_clusters_2d_start: 5
   n_clusters_2d_end: 10
   cluster_type: "slic"              # All below are for EVOS only

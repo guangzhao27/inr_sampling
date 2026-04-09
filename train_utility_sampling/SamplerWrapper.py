@@ -34,7 +34,8 @@ class InrSamplerWrapper:
         n_clusters_2d_end (int): Ending number of 2D clusters. Defaults to 100.
         epochs (int): Total number of training epochs. Defaults to 5000.
         device (str): Device to run sampling on. Defaults to "cuda:0".
-        sample_type (str): Type of sampling strategy ("random", "NMT", "3d_cluster"). Defaults to "random".
+        sample_type (str): Type of sampling strategy ("random", "NMT", "3d_cluster", "2d_grid_linear", "2d_grid_linear_weighted"). Defaults to "random".
+        use_weight_function (bool): Whether to apply per-cell loss-based weights when `sample_type` is `2d_grid_linear_weighted`. Defaults to True.
         sample_rate (float): Fraction of nodes to sample. Defaults to 0.5.
         save_samples_path (Path): Directory to save sampled images. Defaults to Path("logs/sampling").
         save_interval (int): Interval for saving samples. Defaults to 100.
@@ -49,6 +50,7 @@ class InrSamplerWrapper:
         epochs: int = 5000,
         device: str = "cuda:0",
         sample_type: str = "random",
+        use_weight_function: bool = True,
         sample_rate: float = 0.5,
         save_samples_path: Path = Path("logs/sampling"),
         save_interval: int = 100,
@@ -59,10 +61,11 @@ class InrSamplerWrapper:
         self.model.to(self.device)
         
         self.sample_type = sample_type
+        self.use_weight_function = use_weight_function
         self.sample_rate = sample_rate
         self.iters = iters
 
-        if sample_type == "2d_grid_linear":
+        if sample_type in ("2d_grid_linear", "2d_grid_linear_weighted"):
             self.n_clusters_2d_start = n_clusters_2d_start
             self.n_clusters_2d_end = n_clusters_2d_end
             self.epochs = epochs
@@ -503,6 +506,7 @@ class INRSingle2dSamplerWrapper(InrSamplerWrapper):
         """
         n_t = graph.cor.shape[0]  # total number of corrdinates in the graph
         n_samples = max(int(n_t * self.sample_rate), 1)
+        sampling_weight = None
         if self.sample_type == "random":
             sampled_idx = torch.randperm(n_t, device=self.device)[:n_samples]
         
@@ -546,6 +550,51 @@ class INRSingle2dSamplerWrapper(InrSamplerWrapper):
             _, topk_local = torch.topk(dif, n_samples)
             sampled_idx = rough_idx[topk_local]
             # print("time for 2d_cluster sampling: ", str(cal_time))
+
+        elif self.sample_type == '2d_grid_linear_weighted':
+            # Fixed-size uniform grid sampling without top-k filtering.
+            # Every sampled point is kept and weighted by its cell's mean sampled loss.
+            _start = self.n_clusters_2d_start
+            _end = self.n_clusters_2d_end
+            n_bins = np.round(_start + ((_end - _start) / self.epochs) * inner_step).astype(int)
+            n_per_cell = max(1, math.ceil(n_samples / (n_bins * n_bins)))
+
+            bounds_1d = generate_equal_bins(0, self.image_width - 1, n_bins, device='cpu')
+            x_bounds = bounds_1d
+            y_bounds = bounds_1d
+
+            x_low = x_bounds[:, 0].unsqueeze(1).expand(n_bins, n_bins).reshape(-1)
+            x_high = x_bounds[:, 1].unsqueeze(1).expand(n_bins, n_bins).reshape(-1)
+            y_low = y_bounds[:, 0].unsqueeze(0).expand(n_bins, n_bins).reshape(-1)
+            y_high = y_bounds[:, 1].unsqueeze(0).expand(n_bins, n_bins).reshape(-1)
+            bounds = torch.stack([x_low, x_high, y_low, y_high], dim=1)
+
+            cor = sample_multiple_from_2d_intervals(bounds, n_per_cell, device='cpu')
+            x_coords = cor[:, :, 0]
+            y_coords = cor[:, :, 1]
+
+            rough_idx = (y_coords * self.image_width + x_coords).flatten().to(self.device)
+            sampled_idx = rough_idx
+
+            if self.use_weight_function:
+                # Compute sampled per-point loss and assign each point its cell mean loss as weight.
+                with torch.no_grad():
+                    space_emb = graph.space_emb[sampled_idx].to(self.device)
+                    feats = graph.feat[sampled_idx].to(self.device)
+                    preds = self.model(space_emb)
+                    per_point_loss = (feats - preds).pow(2).sum(dim=1)
+
+                    n_cells = n_bins * n_bins
+                    per_cell_mean = per_point_loss.view(n_cells, n_per_cell).mean(dim=1)
+                    sampling_weight = per_cell_mean.repeat_interleave(n_per_cell)
+
+                    # Keep average weight near 1 to avoid changing global loss scale.
+                    mean_w = sampling_weight.mean()
+                    if torch.isfinite(mean_w) and mean_w.item() > 0:
+                        sampling_weight = sampling_weight / mean_w
+                    else:
+                        sampling_weight = torch.ones_like(sampling_weight)
+            dif = None
             
         elif self.sample_type == "2d_grid_adaptive":
             
@@ -622,12 +671,15 @@ class INRSingle2dSamplerWrapper(InrSamplerWrapper):
         
         # print("---sampled_idx---" + str(sampled_idx))
         graph.to(self.device)
-        sampled_graph = Data(
+        sampled_data_kwargs = dict(
             cor=graph.cor[sampled_idx],
             time=graph.time[sampled_idx],
             feat=graph.feat[sampled_idx],
             space_emb=graph.space_emb[sampled_idx],
         )
+        if sampling_weight is not None:
+            sampled_data_kwargs['weight'] = sampling_weight
+        sampled_graph = Data(**sampled_data_kwargs)
 
         # print("---sampled_graph---" + str(sampled_graph))
         
@@ -1403,6 +1455,7 @@ def create_inr_sampler(cfg, inr, graph, current_date_str, run_name, device='cuda
         device=device,
         sample_rate=cfg.sampling.rate,
         sample_type=sampling_type,
+        use_weight_function=cfg.sampling.get("use_weight_function", True),
         save_samples_path=save_path,
         n_clusters_2d_start=cfg.sampling.n_clusters_2d_start,
         n_clusters_2d_end=cfg.sampling.n_clusters_2d_end,

@@ -13,7 +13,8 @@ from itertools import islice
 from time import time
 
 
-os.environ["WANDB_DIR"] = '/pscratch/sd/g/gzhao27/INR/coral/wandb'
+REPO_ROOT = Path(__file__).resolve().parents[1]
+os.environ["WANDB_DIR"] = str(REPO_ROOT / "coral" / "wandb")
 os.environ["RESULTS_DIR"] = ''
 
 import wandb
@@ -122,6 +123,7 @@ def create_inr_sampler(cfg, inr, graph, current_date_str, run_name, device='cuda
         device=device,
         sample_rate=cfg.sampling.rate,
         sample_type=sampler_name,
+        use_weight_function=cfg.sampling.get("use_weight_function", True),
         save_samples_path=save_path,
         n_clusters_2d_start=cfg.sampling.n_clusters_2d_start,
         n_clusters_2d_end=cfg.sampling.n_clusters_2d_end,
@@ -465,10 +467,9 @@ def main(cfg: DictConfig) -> None:
             if loss_to_check < best_loss:
                 best_loss = loss_to_check
 
-                dir_path = f'/pscratch/sd/g/gzhao27/INR/INR_SAMPLE/Results/checkpoints/{current_date_str+run_name_str}'
-                if not os.path.exists(dir_path):
-                    os.makedirs(dir_path)
-                savepath = f'{dir_path}/{step}.pt'
+                dir_path = REPO_ROOT / "Results" / "checkpoints" / f"{current_date_str + run_name_str}"
+                dir_path.mkdir(parents=True, exist_ok=True)
+                savepath = dir_path / f"{step}.pt"
 
                 # Build graph snapshot (CPU) for visualization
                 _graph_data = {
@@ -491,7 +492,7 @@ def main(cfg: DictConfig) -> None:
                     "output_dim": output_dim,
                     "graph_data": _graph_data,
                 }
-                torch.save(_ckpt, savepath)
+                torch.save(_ckpt, str(savepath))
 
                 # Also save best checkpoint to a local, predictable path
                 _local_ckpt_dir = './checkpoints'

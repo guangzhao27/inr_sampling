@@ -111,7 +111,6 @@ sampling:
   rate: 0.2
   adaptive_mode: "loss"            # only used by sampling.type=2d_grid_adaptive: "gradient", "loss", or "loss_true"
   adaptive_grid_update_interval: 100  # only used by sampling.type=2d_grid_adaptive
-  adaptive_update_values_each_step: True  # only used by sampling.type=2d_grid_adaptive
   use_weight_function: True          # only used by sampling.type=2d_grid_linear_weighted
   n_clusters_2d_start: 5
   n_clusters_2d_end: 10

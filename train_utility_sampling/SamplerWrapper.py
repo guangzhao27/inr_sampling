@@ -678,7 +678,6 @@ class INRSingle2dAdaptiveSamplerWrapper(InrSamplerWrapper):
         sample_rate: float = 0.5,
         mode: str = "loss",
         grid_update_interval: int = 100,
-        adaptive_update_values_each_step: bool = True,
         save_samples_path: Path = Path("logs/sampling"),
         save_interval: int = 100,
         image_width: int = 512,
@@ -695,28 +694,35 @@ class INRSingle2dAdaptiveSamplerWrapper(InrSamplerWrapper):
         )
         self.mode = mode
         self.grid_update_interval = max(1, int(grid_update_interval))
-        self.adaptive_update_values_each_step = bool(adaptive_update_values_each_step)
         
         # Store graph reference for evaluation function
         self.cached_graph = None
-        self.cached_grid: Optional[HierarchicalImageGrid] = None
         self.last_grid_update_step: Optional[int] = None
         self.cached_bounds: Optional[torch.Tensor] = None
         self.cached_cell_sizes: Optional[torch.Tensor] = None
         self.cached_values: Optional[torch.Tensor] = None
 
-    def _should_refresh_grid(self, inner_step: int) -> bool:
-        """Refresh adaptive grid on first use and every `grid_update_interval` steps."""
-        if self.cached_grid is None or self.last_grid_update_step is None:
+    def _should_refresh_cache(self, inner_step: int) -> bool:
+        """Refresh cached bounds/sizes/values on first use and every `grid_update_interval` steps."""
+        if self.last_grid_update_step is None:
+            return True
+        if self.cached_bounds is None or self.cached_cell_sizes is None or self.cached_values is None:
             return True
         return (inner_step - self.last_grid_update_step) >= self.grid_update_interval
 
-    def _refresh_leaf_properties(
+    def _refresh_cached_leaf_properties(
         self,
-        grid: HierarchicalImageGrid,
         eval_fn,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Compute and cache leaf bounds/areas/values for later reuse."""
+        """Rebuild adaptive grid and cache leaf bounds/areas/values."""
+        grid = HierarchicalImageGrid(self.image_width, self.image_width, initial_grid_size=16)
+        grid.iterative_subdivision(
+            eval_fn,
+            iterations=5,
+            percentage=10,
+            batch_mode=True,
+        )
+
         bounds, cell_sizes, values = grid.get_leaf_properties_tensor(
             evaluation_function=eval_fn,
             device=self.device,
@@ -725,25 +731,6 @@ class INRSingle2dAdaptiveSamplerWrapper(InrSamplerWrapper):
         self.cached_cell_sizes = cell_sizes
         self.cached_values = values
         return bounds, cell_sizes, values
-
-    def _get_leaf_properties(
-        self,
-        grid: HierarchicalImageGrid,
-        eval_fn,
-        refresh_grid: bool,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Return leaf properties, optionally reusing cached values between grid updates."""
-        if refresh_grid or self.adaptive_update_values_each_step:
-            return self._refresh_leaf_properties(grid, eval_fn)
-
-        if (
-            self.cached_bounds is None
-            or self.cached_cell_sizes is None
-            or self.cached_values is None
-        ):
-            return self._refresh_leaf_properties(grid, eval_fn)
-
-        return self.cached_bounds, self.cached_cell_sizes, self.cached_values
     
     
     def _create_evaluation_function(self, graph: Data, mode: str = 'gradient'):
@@ -835,29 +822,17 @@ class INRSingle2dAdaptiveSamplerWrapper(InrSamplerWrapper):
         # Create evaluation function with graph context
         eval_fn = self._create_evaluation_function(graph, mode=self.mode)
         
-        # Rebuild/subdivide the adaptive grid only periodically.
-        refresh_grid = self._should_refresh_grid(inner_step)
-        if refresh_grid:
-            grid = HierarchicalImageGrid(self.image_width, self.image_width, initial_grid_size=16)
-            grid.iterative_subdivision(
-                eval_fn,
-                iterations=5,
-                percentage=10,
-                batch_mode=True,
-            )
-            self.cached_grid = grid
+        # Recompute bounds/sizes/values only periodically.
+        refresh_cache = self._should_refresh_cache(inner_step)
+        if refresh_cache:
+            bounds, cell_sizes, values = self._refresh_cached_leaf_properties(eval_fn)
             self.last_grid_update_step = inner_step
         else:
-            if self.cached_grid is None:
-                raise RuntimeError("Adaptive grid cache is empty when attempting to reuse it.")
-            grid = self.cached_grid
-        
-        # Get cell boundaries and sample from each cell
-        bounds, cell_sizes, values = self._get_leaf_properties(
-            grid,
-            eval_fn,
-            refresh_grid=refresh_grid,
-        )
+            if self.cached_bounds is None or self.cached_cell_sizes is None or self.cached_values is None:
+                raise RuntimeError("Adaptive cache is empty when attempting to reuse it.")
+            bounds = self.cached_bounds
+            cell_sizes = self.cached_cell_sizes
+            values = self.cached_values
         
         counts = sample_counts_poisson(values, expected_total=n_samples)
         n_cells = bounds.shape[0]
@@ -1481,7 +1456,6 @@ def create_inr_sampler(cfg, inr, graph, current_date_str, run_name, device='cuda
             sample_rate=cfg.sampling.rate,
             mode=cfg.sampling.get("adaptive_mode", "loss"),
             grid_update_interval=cfg.sampling.get("adaptive_grid_update_interval", 100),
-            adaptive_update_values_each_step=cfg.sampling.get("adaptive_update_values_each_step", True),
             save_samples_path=save_path,
             image_width = image_width
         )

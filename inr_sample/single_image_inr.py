@@ -104,7 +104,6 @@ def create_inr_sampler(cfg, inr, graph, current_date_str, run_name, device='cuda
             sample_rate=cfg.sampling.rate,
             mode=cfg.sampling.get("adaptive_mode", "loss"),
             grid_update_interval=cfg.sampling.get("adaptive_grid_update_interval", 100),
-            adaptive_update_values_each_step=cfg.sampling.get("adaptive_update_values_each_step", True),
             save_samples_path=save_path,
             image_width=image_width,
         )

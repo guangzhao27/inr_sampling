@@ -38,11 +38,9 @@ data_path="/pscratch/sd/g/gzhao27/INR/INR_SAMPLE/data/NS2d/ns_data_res2048_re${r
 
 # Sweep knobs for adaptive sampler.
 interval_list=(50 200)
-update_values_each_step_list=(true false)
 
 for interval in "${interval_list[@]}"; do
-  for update_values_each_step in "${update_values_each_step_list[@]}"; do
-    run_name="NS1024_single_2d_grid_adaptive_int${interval}_updateval${update_values_each_step}_re_${re}_sampling_${sampling_rate}_lr_${lr}_depth_${depth}_t${time_frame}"
+    run_name="NS1024_re_${re}_sampling_${sampling_rate}_lr_${lr}_depth_${depth}_t${time_frame}_single_2d_grid_adaptive_int${interval}"
 
     python inr_sample/single_image_inr.py \
       data.dataset_name=NS \
@@ -65,10 +63,8 @@ for interval in "${interval_list[@]}"; do
       sampling.rate=$sampling_rate \
       sampling.adaptive_mode=loss \
       sampling.adaptive_grid_update_interval=$interval \
-      sampling.adaptive_update_values_each_step=$update_values_each_step \
       "data.split_ratios=[${train_ratio}, 0.01, 0.01]" \
       data.data_path=$data_path \
       data.data_type=other \
       data.single_time_frame=${time_frame}
-  done
 done

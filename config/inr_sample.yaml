@@ -110,6 +110,9 @@ sampling:
   type: "random"
   rate: 0.2
   adaptive_mode: "loss"            # only used by sampling.type=2d_grid_adaptive: "gradient", "loss", or "loss_true"
+  adaptive_weight_mode: "inverse_value"  # only used by 2d_grid_adaptive: "none", "inverse_value", "area_over_count", "sampled_dif"
+  adaptive_weight_value_eps: 1e-6   # denominator clamp for inverse_value mode
+  adaptive_weight_clip_ratio: 10.0  # clip per-cell weights to median*ratio; <=0 disables clipping
   adaptive_grid_update_interval: 100  # only used by sampling.type=2d_grid_adaptive
   use_weight_function: True          # only used by sampling.type=2d_grid_linear_weighted
   n_clusters_2d_start: 5

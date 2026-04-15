@@ -75,6 +75,9 @@ class InrSamplerWrapper:
         self.save_interval = save_interval
         self.save_samples_path = save_samples_path
         self.image_width = image_width
+        # Optional visualization caches populated by specific samplers.
+        self.cached_linear_bounds: Optional[torch.Tensor] = None
+        self.cached_linear_n_bins: Optional[int] = None
 
 
     def _get_T(self, graph: Data) -> int:
@@ -384,11 +387,6 @@ def graph_2d_cluster_old(graph, n_segments, compactness, cluster_dim='2d', num_p
             k = num_per_cluster
             perm = torch.randperm(n)[:k]
             chosen = idx_tensor[perm].to(device)
-            # print("Chosen: " + str(chosen.device))
-            # print("idx_tensor: " + str(idx_tensor.device))
-            # print("perm: " + str(perm.device))
-            # print("offset: " + str(offset.device))
-            # chosen.to(device)
             samples.append(chosen+offset)
         return samples
         
@@ -536,6 +534,8 @@ class INRSingle2dSamplerWrapper(InrSamplerWrapper):
             y_high = y_bounds[:, 1].unsqueeze(0).expand(n_bins, n_bins).reshape(-1)  # (n_bins*n_bins,)
 
             bounds = torch.stack([x_low, x_high, y_low, y_high], dim=1)  # (n_bins*n_bins, 4)
+            self.cached_linear_bounds = bounds.detach().cpu()
+            self.cached_linear_n_bins = int(n_bins)
             cor = sample_multiple_from_2d_intervals(bounds, n_per_cell, device='cpu')  
             
             x_coords = cor[:, :, 0]  # x-coordinates
@@ -543,7 +543,6 @@ class INRSingle2dSamplerWrapper(InrSamplerWrapper):
             rough_idx = (y_coords * self.image_width + x_coords).flatten().to(self.device)
             space_emb = graph.space_emb[rough_idx].to(self.device)  # [N_rough, D]
             feats = graph.feat[rough_idx].to(self.device)  # [N_rough, F]
-            # print(" time for 2d_cluster sampling rough idx: ", str(time()-t0))
             # t0 = time()
             with torch.no_grad():
                 preds = self.model(space_emb)
@@ -551,7 +550,6 @@ class INRSingle2dSamplerWrapper(InrSamplerWrapper):
             n_samples = min(n_samples, len(dif))
             _, topk_local = torch.topk(dif, n_samples)
             sampled_idx = rough_idx[topk_local]
-            # print("time for 2d_cluster sampling: ", str(cal_time))
 
         elif self.sample_type == '2d_grid_linear_weighted':
             # Fixed-size uniform grid sampling without top-k filtering.
@@ -570,6 +568,8 @@ class INRSingle2dSamplerWrapper(InrSamplerWrapper):
             y_low = y_bounds[:, 0].unsqueeze(0).expand(n_bins, n_bins).reshape(-1)
             y_high = y_bounds[:, 1].unsqueeze(0).expand(n_bins, n_bins).reshape(-1)
             bounds = torch.stack([x_low, x_high, y_low, y_high], dim=1)
+            self.cached_linear_bounds = bounds.detach().cpu()
+            self.cached_linear_n_bins = int(n_bins)
 
             cor = sample_multiple_from_2d_intervals(bounds, n_per_cell, device='cpu')
             x_coords = cor[:, :, 0]
@@ -677,6 +677,9 @@ class INRSingle2dAdaptiveSamplerWrapper(InrSamplerWrapper):
         device: str = "cuda:0",
         sample_rate: float = 0.5,
         mode: str = "loss",
+        weight_mode: str = "inverse_value",
+        weight_value_eps: float = 1e-6,
+        weight_clip_ratio: float = 10.0,
         grid_update_interval: int = 100,
         save_samples_path: Path = Path("logs/sampling"),
         save_interval: int = 100,
@@ -693,6 +696,14 @@ class INRSingle2dAdaptiveSamplerWrapper(InrSamplerWrapper):
             image_width=image_width,    
         )
         self.mode = mode
+        valid_weight_modes = {"none", "inverse_value", "area_over_count", "sampled_dif"}
+        if weight_mode not in valid_weight_modes:
+            raise ValueError(
+                f"Unknown weight_mode '{weight_mode}'. Expected one of {sorted(valid_weight_modes)}"
+            )
+        self.weight_mode = weight_mode
+        self.weight_value_eps = float(weight_value_eps)
+        self.weight_clip_ratio = float(weight_clip_ratio)
         self.grid_update_interval = max(1, int(grid_update_interval))
         
         # Store graph reference for evaluation function
@@ -701,6 +712,26 @@ class INRSingle2dAdaptiveSamplerWrapper(InrSamplerWrapper):
         self.cached_bounds: Optional[torch.Tensor] = None
         self.cached_cell_sizes: Optional[torch.Tensor] = None
         self.cached_values: Optional[torch.Tensor] = None
+        self.cached_grid: Optional[HierarchicalImageGrid] = None
+
+    def _normalize_and_clip_cell_weights(self, per_cell_weight: torch.Tensor) -> torch.Tensor:
+        """Clamp invalid/extreme cell weights, then normalize by mean for stability."""
+        w = per_cell_weight.to(torch.float32)
+        w = torch.nan_to_num(w, nan=0.0, posinf=0.0, neginf=0.0)
+        w = w.clamp_min(0.0)
+
+        if self.weight_clip_ratio > 0:
+            positive = w[w > 0]
+            if positive.numel() > 0:
+                med = positive.median()
+                if torch.isfinite(med) and med.item() > 0:
+                    cap = med * self.weight_clip_ratio
+                    w = torch.clamp(w, max=cap)
+
+        mean_w = w.mean()
+        if torch.isfinite(mean_w) and mean_w.item() > 0:
+            return w / mean_w
+        return torch.ones_like(w)
 
     def _should_refresh_cache(self, inner_step: int) -> bool:
         """Refresh cached bounds/sizes/values on first use and every `grid_update_interval` steps."""
@@ -715,11 +746,11 @@ class INRSingle2dAdaptiveSamplerWrapper(InrSamplerWrapper):
         eval_fn,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Rebuild adaptive grid and cache leaf bounds/areas/values."""
-        grid = HierarchicalImageGrid(self.image_width, self.image_width, initial_grid_size=16)
+        grid = HierarchicalImageGrid(self.image_width, self.image_width, initial_grid_size=8)
         grid.iterative_subdivision(
             eval_fn,
-            iterations=5,
-            percentage=10,
+            iterations=8,
+            percentage=20,
             batch_mode=True,
         )
 
@@ -730,6 +761,7 @@ class INRSingle2dAdaptiveSamplerWrapper(InrSamplerWrapper):
         self.cached_bounds = bounds
         self.cached_cell_sizes = cell_sizes
         self.cached_values = values
+        self.cached_grid = grid
         return bounds, cell_sizes, values
     
     
@@ -825,18 +857,18 @@ class INRSingle2dAdaptiveSamplerWrapper(InrSamplerWrapper):
         # Recompute bounds/sizes/values only periodically.
         refresh_cache = self._should_refresh_cache(inner_step)
         if refresh_cache:
-            bounds, cell_sizes, values = self._refresh_cached_leaf_properties(eval_fn)
+            bounds, cell_area, values = self._refresh_cached_leaf_properties(eval_fn)
             self.last_grid_update_step = inner_step
         else:
             if self.cached_bounds is None or self.cached_cell_sizes is None or self.cached_values is None:
                 raise RuntimeError("Adaptive cache is empty when attempting to reuse it.")
             bounds = self.cached_bounds
-            cell_sizes = self.cached_cell_sizes
+            cell_area = self.cached_cell_sizes
             values = self.cached_values
+        # values is loss_variance.sqrt() * cell_areas_tensor
         
         counts = sample_counts_poisson(values, expected_total=n_samples)
         n_cells = bounds.shape[0]
-        n_per_cell = max(1, int(np.ceil(n_samples / n_cells)))
         
         # Sample coordinates from cells (bounds are now inclusive)
         samples_xy, cell_ids, ptr = sample_variable_from_2d_intervals_vcounts(bounds, counts, device=self.device)
@@ -846,32 +878,45 @@ class INRSingle2dAdaptiveSamplerWrapper(InrSamplerWrapper):
         y_coords = samples_xy[:, 1]  # (total_samples,)
         sampled_idx = y_coords * self.image_width + x_coords  # (total_samples,)
 
-        # Create per-sample weights:
-        # Weight per sample in cell i: cell_area / n_samples_from_cell_i
-        # Here cell_area = cell_sizes[i], n_samples_from_cell_i = counts[i]
-        # Use gather via cell_ids
         counts_f = counts.to(torch.float32)
-        cell_sizes_f = cell_sizes.to(torch.float32)
+        cell_area_f = cell_area.to(torch.float32)
+        values_f = values.to(torch.float32)
 
-        # Avoid division by zero (even though samples only exist where counts>0, this is safer)
-        per_cell_weight = cell_sizes_f / values  
-        # proportional weights, values is the cell probability, cell_sizes_f is the cell area
-        per_cell_weight = per_cell_weight / torch.sum(per_cell_weight) / n_samples
-        sampled_weights = per_cell_weight[cell_ids]         # (total_samples,)
-        graph.to(self.device)
+        graph_on_device = graph.to(self.device)
+
+        if self.weight_mode == "sampled_dif":
+            with torch.no_grad():
+                space_emb = graph_on_device.space_emb[sampled_idx]
+                feats = graph_on_device.feat[sampled_idx]
+                preds = self.model(space_emb)
+                sampled_weights = torch.sum((feats - preds).abs(), dim=1)
+            sampled_weights = self._normalize_and_clip_cell_weights(sampled_weights)
+        else:
+            if self.weight_mode == "none":
+                per_cell_weight = torch.ones_like(cell_area_f)
+            elif self.weight_mode == "inverse_value":
+                values_safe = values_f.clamp_min(self.weight_value_eps)
+                per_cell_weight = cell_area_f / values_safe
+            elif self.weight_mode == "area_over_count":
+                counts_safe = counts_f.clamp_min(1.0)
+                per_cell_weight = values_f / cell_area_f
+            else:
+                raise ValueError(f"Unsupported weight_mode: {self.weight_mode}")
+            per_cell_weight = self._normalize_and_clip_cell_weights(per_cell_weight)
+            sampled_weights = per_cell_weight[cell_ids]         # (total_samples,)
         sampled_graph = Data(
-            cor=graph.cor[sampled_idx],
-            time=graph.time[sampled_idx],
-            feat=graph.feat[sampled_idx],
-            space_emb=graph.space_emb[sampled_idx],
+            cor=graph_on_device.cor[sampled_idx],
+            time=graph_on_device.time[sampled_idx],
+            feat=graph_on_device.feat[sampled_idx],
+            space_emb=graph_on_device.space_emb[sampled_idx],
             weight=sampled_weights,
         )
         
-        if save_image:
-            self.save_image_path = os.path.join(
-                self.save_samples_path, f"adaptive_i{inner_step}"
-            )
-            self._save_sample_images(graph, sampled_graph)
+        # if save_image:
+        #     self.save_image_path = os.path.join(
+        #         self.save_samples_path, f"adaptive_i{inner_step}"
+        #     )
+        #     self._save_sample_images(graph, sampled_graph)
         
         return sampled_graph.to(self.device)
 
@@ -985,20 +1030,17 @@ class EVOSSampler:
     def _sampler_get_coords_gt(self, epoch, graph):
         # coords, gt = self.graph.space_emb, self.graph.feat
         coords, gt = self.full_coords, self.full_gt
-        # print("---coords---\n" + str(coords) + "\n---full_gt---\n" + str(gt))
         # TODO: Pass in coords and gt
         self.cur_use_ratio = self._get_cur_use_ratio(epoch)
 
         self._reset_rng()
  
         if self._evos_is_fitness_eval_iter(epoch):
-            # print("===Fitness Epoch===\nEpoch: " + str(epoch))
             return coords, gt, None
         else:
             selection_mask = self._evos_get_selection_mask(epoch)
             _coords = self.full_coords[selection_mask]
             _gt = self.full_gt[selection_mask]
-            # print("***Not Fitness Epoch, Selected Points***\nEpoch" + str(epoch))
             return _coords, _gt, selection_mask
 
         self._recover_rng()
@@ -1125,9 +1167,7 @@ class EVOSSampler:
         self.book["sorted_map_index"] = sorted_map_index
 
         if self.cfg.sampling.crossover_method == "select":
-            # print("===pred===\n" + str(pred))
             r_img = self.reconstruct_img(pred)
-            # print("devices---->r_img: " + str(r_img.device) + " cached_gt_lap: " + str(self.cached_gt_lap.device))
             laplace_map = F.mse_loss(
                 compute_laplacian(r_img).squeeze(), self.cached_gt_lap, reduction="none"
             )
@@ -1187,32 +1227,22 @@ class EVOSSampler:
         return F.mse_loss(pred, gt)
 
     def reconstruct_img(self, data) -> torch.tensor:    # From EVOS img_trainer.py
-        # print("===in reconstruct===\n" + str(data))
         img = data.reshape(self.H, self.W, self.C).permute(2, 0, 1)  # c,h,w
-        # print("===pre decode img===\n" + str(img))
-        # img = self._decode_img(img)
-        # print("===post decode img===\n" + str(img))
         return img
 
     def _decode_img(self, data):    # From EVOS img_trainer.py
         data = self.transform.inverse(data)
-        # print("===transform_inverse_data===\n" + str(data))
         data = data * 255.0
         data = torch.clamp(data, min=0, max=255)
         return data
 
     def _parse_input_data(self):
         img = self.input_img.permute(2, 0, 1)  # c,h,w
-        # print("---img---\n" + str(img))
         self.input_img = img
         self.gt = img
         self.C, self.H, self.W = img.shape
-        # print("---c---\n" + str(self.C))
-        # print("\n---h---\n" + str(self.H))
-        # print("\n---w---\n" + str(self.W))
 
     def _encode_img(self, img):
-        # print("---img before encode---\n" + str(img))
         img = torch.clamp(img, min=0, max=255)
         img = img / 255.0
         img = self.transform.tranform(img)
@@ -1455,6 +1485,9 @@ def create_inr_sampler(cfg, inr, graph, current_date_str, run_name, device='cuda
             device=device,
             sample_rate=cfg.sampling.rate,
             mode=cfg.sampling.get("adaptive_mode", "loss"),
+            weight_mode=cfg.sampling.adaptive_weight_mode,
+            weight_value_eps=cfg.sampling.get("adaptive_weight_value_eps", 1e-6),
+            weight_clip_ratio=cfg.sampling.get("adaptive_weight_clip_ratio", 10.0),
             grid_update_interval=cfg.sampling.get("adaptive_grid_update_interval", 100),
             save_samples_path=save_path,
             image_width = image_width

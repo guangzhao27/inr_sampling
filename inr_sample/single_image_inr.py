@@ -36,11 +36,7 @@ from train_utility_sampling.train_utility import (
     validation_step_single_image,
 )
 from train_utility_sampling.SamplerWrapper import (
-    INRSingle2dSamplerWrapper,
-    INRSingle2dAdaptiveSamplerWrapper,
-    add_cluster_label,
-    graph_2d_cluster_single_image,
-    EVOSSampler,
+    create_inr_sampler,
 )
 from utils.data.load_data import set_seed
 from utils.load_inr import create_inr_instance, load_inr_model
@@ -79,59 +75,59 @@ def initialize_wandb(cfg):
         print("dir", run.dir)
         return run
     
-def create_inr_sampler(cfg, inr, graph, current_date_str, run_name, device='cuda'):
-    """
-    Build and return an INRSingle2dSamplerWrapper or EVOSSampler based on cfg.sampling 
-    settings, or None if no sampling type is specified.
-    """
-    sampling_type = cfg.sampling.type
-    image_width = graph.cor.max().item() + 1  # Set image width from space_emb shape
+# def create_inr_sampler(cfg, inr, graph, current_date_str, run_name, device='cuda'):
+#     """
+#     Build and return an INRSingle2dSamplerWrapper or EVOSSampler based on cfg.sampling 
+#     settings, or None if no sampling type is specified.
+#     """
+#     sampling_type = cfg.sampling.type
+#     image_width = graph.cor.max().item() + 1  # Set image width from space_emb shape
     
-    if sampling_type is None:
-        return None
+#     if sampling_type is None:
+#         return None
 
-    # Precompute SLIC clusters once for the slic sampler.
-    if sampling_type == "2d_cluster_slic":
-        _start = cfg.sampling.n_clusters_2d_start
-        graph_2d_cluster_single_image(graph, _start, 0.01, "slic")
-        sampler_name = sampling_type
-    elif sampling_type == "2d_grid_adaptive":
-        save_path = f'./sampled_frames/{current_date_str + run_name}'
-        return INRSingle2dAdaptiveSamplerWrapper(
-            model=inr,
-            iters=0,
-            device=device,
-            sample_rate=cfg.sampling.rate,
-            mode=cfg.sampling.get("adaptive_mode", "loss"),
-            grid_update_interval=cfg.sampling.get("adaptive_grid_update_interval", 100),
-            save_samples_path=save_path,
-            image_width=image_width,
-        )
-    elif sampling_type == "EVOS":
-        H = int(np.sqrt(len(graph.feat)))
-        img = graph.feat.reshape(H, H)
-        img = img.unsqueeze(0)
-        # print("===img for evos===\n" + str(img))
-        # print("===shape for evos===\n" + str(img.shape))
-        return EVOSSampler(cfg, img, graph)
+#     # Precompute SLIC clusters once for the slic sampler.
+#     if sampling_type == "2d_cluster_slic":
+#         _start = cfg.sampling.n_clusters_2d_start
+#         graph_2d_cluster_single_image(graph, _start, 0.01, "slic")
+#         sampler_name = sampling_type
+#     elif sampling_type == "2d_grid_adaptive":
+#         save_path = f'./sampled_frames/{current_date_str + run_name}'
+#         return INRSingle2dAdaptiveSamplerWrapper(
+#             model=inr,
+#             iters=0,
+#             device=device,
+#             sample_rate=cfg.sampling.rate,
+#             mode=cfg.sampling.get("adaptive_mode", "loss"),
+#             grid_update_interval=cfg.sampling.get("adaptive_grid_update_interval", 100),
+#             save_samples_path=save_path,
+#             image_width=image_width,
+#         )
+#     elif sampling_type == "EVOS":
+#         H = int(np.sqrt(len(graph.feat)))
+#         img = graph.feat.reshape(H, H)
+#         img = img.unsqueeze(0)
+#         # print("===img for evos===\n" + str(img))
+#         # print("===shape for evos===\n" + str(img.shape))
+#         return EVOSSampler(cfg, img, graph)
 
-    else:
-        sampler_name = sampling_type
+#     else:
+#         sampler_name = sampling_type
 
-    save_path = f'./sampled_frames/{current_date_str + run_name}'
-    return INRSingle2dSamplerWrapper(
-        model=inr,
-        iters=0,
-        device=device,
-        sample_rate=cfg.sampling.rate,
-        sample_type=sampler_name,
-        use_weight_function=cfg.sampling.get("use_weight_function", True),
-        save_samples_path=save_path,
-        n_clusters_2d_start=cfg.sampling.n_clusters_2d_start,
-        n_clusters_2d_end=cfg.sampling.n_clusters_2d_end,
-        epochs = cfg.optim.epochs,
-        image_width = image_width
-    )
+#     save_path = f'./sampled_frames/{current_date_str + run_name}'
+#     return INRSingle2dSamplerWrapper(
+#         model=inr,
+#         iters=0,
+#         device=device,
+#         sample_rate=cfg.sampling.rate,
+#         sample_type=sampler_name,
+#         use_weight_function=cfg.sampling.get("use_weight_function", True),
+#         save_samples_path=save_path,
+#         n_clusters_2d_start=cfg.sampling.n_clusters_2d_start,
+#         n_clusters_2d_end=cfg.sampling.n_clusters_2d_end,
+#         epochs = cfg.optim.epochs,
+#         image_width = image_width
+#     )
 
 
 def _build_trainset(cfg, latent_dim, data_path, dataset_name, data_type, seed, space_factor):
@@ -371,6 +367,7 @@ def main(cfg: DictConfig) -> None:
 
 
     ''' Begin the sampling setting '''
+    print("before:", cfg.sampling.adaptive_weight_mode)
     inr_sampler = create_inr_sampler(cfg, inr, graph, current_date_str, run_name)
     if cfg.sampling.type == "EVOS":
         inr_sampler._evos_init()
@@ -437,7 +434,7 @@ def main(cfg: DictConfig) -> None:
                 device=device, 
                 use_rel_loss=use_rel_loss,
                 optimizer=optimizer,
-                sampler=None,
+                sampler=inr_sampler,
                 cfg = cfg
                 )
 

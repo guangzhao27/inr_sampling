@@ -61,3 +61,10 @@ Simple version for adaptive grid function:
 3. use cached value to update grid instance, not remove old and add new cells on top
 4. /utils/quadtree.py#L37 set the smallest cell size
 
+/pscratch/sd/g/gzhao27/INR/fix-grid-exp/train_utility_sampling/SamplerWrapper.py#727
+
+
+current setting:
+value: loss_std*area
+each cell count: propotional to value
+each sample weight: area/value/average_sample_num (the real sample number is not same as expected sample number)

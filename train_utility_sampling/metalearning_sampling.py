@@ -1,4 +1,5 @@
 from functools import partial
+from typing import Optional
 import torch
 import torch.nn as nn
 import torch.utils.checkpoint as cp
@@ -80,6 +81,32 @@ def get_grad_norm(model):
     concat_grads = torch.cat(grads)
     total_norm = torch.norm(concat_grads)
     return total_norm
+
+
+def _weighted_point_mse(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    sample_weight: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Compute per-point MSE with optional point-wise weights.
+
+    The first dimension is treated as the point axis. Any remaining dimensions
+    are reduced as the per-point squared-error mean.
+    """
+    err_sq = (pred - target).pow(2)
+    per_point_mse = err_sq.reshape(err_sq.shape[0], -1).mean(dim=1)
+
+    if sample_weight is None:
+        return per_point_mse.mean()
+
+    w = sample_weight.to(device=per_point_mse.device, dtype=per_point_mse.dtype).reshape(-1)
+    if w.numel() != per_point_mse.numel():
+        return per_point_mse.mean()
+
+    w_sum = w.sum()
+    if not torch.isfinite(w_sum) or w_sum.item() <= 0:
+        return per_point_mse.mean()
+    return (w * per_point_mse).sum() / w_sum
 
 def grad_norm_per_pixel(model, per_pix_losses, optimizer):
     pix_norms = []
@@ -205,6 +232,8 @@ def graph_inner_loop(
         coords = graph.space_emb
         features = graph.feat
         batch_index = graph.time
+        sample_weight = getattr(graph, "weight", None)
+        print(sample_weight)
         # TODO: graph = inr.sample(graph, sample_params)
         # coords = graph.space_emb
         # features = graph.feat
@@ -221,6 +250,7 @@ def graph_inner_loop(
                 torch.as_tensor(is_train),
                 torch.as_tensor(gradient_checkpointing),
                 loss_type,
+                sample_weight,
             )
         else:
             fitted_modulations = graph_inner_loop_step(
@@ -233,6 +263,7 @@ def graph_inner_loop(
                 is_train,
                 gradient_checkpointing,
                 loss_type,
+                sample_weight,
             )
     return fitted_modulations
 
@@ -247,6 +278,7 @@ def graph_inner_loop_step(
     is_train=False,
     gradient_checkpointing=False,
     loss_type="mse",
+    sample_weight=None,
     last_element=False,
 ):
     """Performs a single inner loop step."""
@@ -274,7 +306,7 @@ def graph_inner_loop_step(
         features_recon = func_rep.modulated_forward(coords, modulations[batch_index])
         # features = features.reshape(-1, 1)
         assert features_recon.shape == features.shape, 'two matrix should have same shape'
-        loss = ((features_recon - features) ** 2).mean() * batch_size
+        loss = _weighted_point_mse(features_recon, features, sample_weight) * batch_size
 
         # If we are training, we should create graph since we will need this to
         # compute second order gradients in the MAML outer loop
@@ -385,7 +417,8 @@ def graph_outer_step(
         if feat_inv_transform:
             features_recon = feat_inv_transform(features_recon)
             features = feat_inv_transform(features)
-        loss = ((features_recon - features) ** 2).mean()
+        sample_weight = getattr(graph, "weight", None)
+        loss = _weighted_point_mse(features_recon, features, sample_weight)
 
     outputs = {
         "loss": loss,
@@ -445,14 +478,7 @@ def single_image_step(
     else:
         # Use weighted MSE when sampler attaches per-sample importance weights.
         if hasattr(graph, "weight") and graph.weight is not None:
-            err = features_recon - graph.feat
-            w = graph.weight.to(err)
-            weighted_sq_err = (w * err.pow(2)).sum()
-            w_sum = w.sum()
-            if torch.isfinite(w_sum) and w_sum.item() > 0:
-                loss = weighted_sq_err / w_sum / len(err)
-            else:
-                loss = err.pow(2).mean()
+            loss = _weighted_point_mse(features_recon, graph.feat, graph.weight)
         else:
             loss = F.mse_loss(features_recon, graph.feat)
 

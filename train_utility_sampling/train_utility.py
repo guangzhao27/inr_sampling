@@ -5,6 +5,8 @@ from .metalearning_sampling import graph_outer_step as outer_step
 from .metalearning_sampling import graph_inner_loop, single_image_step
 from torch.nn.parallel import DistributedDataParallel as DDP
 import numpy as np
+import matplotlib.pyplot as plt
+from pathlib import Path
 from time import time
 def divide_array_indexes(N, k):
     # Base size and extra elements
@@ -329,7 +331,7 @@ def validation_step_single_image(step, graph, inr, device,
         is_train=False,
         return_reconstructions=False,
         use_rel_loss=use_rel_loss,
-        sampler=sampler, 
+        sampler=None,
         cfg = cfg
     )
     
@@ -342,8 +344,110 @@ def validation_step_single_image(step, graph, inr, device,
     
     psnr_score = outputs['psnr']
     ssim_score = outputs['ssim']
+
+    if sampler is not None:
+        _save_validation_sampling_dynamics(
+            step=step,
+            graph=graph,
+            inr=inr,
+            sampler=sampler,
+            cfg=cfg,
+        )
         
     return val_loss, rel_val_loss, psnr_score, ssim_score
+
+
+def _sample_with_current_sampler(step: int, graph: Data, sampler, cfg):
+    """Sample points with the current sampler using the same branch logic as training."""
+    with torch.no_grad():
+        if cfg is not None and cfg.sampling.type == "EVOS":
+            return sampler.sample(graph, step)
+        return sampler.sample(
+            inner_step=step,
+            graph=graph,
+            save_image=False,
+        )
+
+
+def _save_validation_sampling_dynamics(step: int, graph: Data, inr, sampler, cfg=None):
+    """Save per-pixel loss heatmap with sampled points and adaptive grid overlays."""
+    if not hasattr(graph, "cor") or not hasattr(graph, "space_emb") or not hasattr(graph, "feat"):
+        return
+
+    with torch.no_grad():
+        pred = inr(graph.space_emb)
+        pixel_loss = (pred - graph.feat).pow(2).flatten()
+
+    coords = graph.cor.long().detach().cpu()
+    losses = pixel_loss.detach().cpu().numpy()
+    sampled_graph = _sample_with_current_sampler(step, graph, sampler, cfg)
+    sampled_coords = sampled_graph.cor.detach().cpu().numpy() if hasattr(sampled_graph, "cor") else np.empty((0, 2))
+
+    # Single-image path is expected to have one frame and square grids.
+    h = int(coords[:, 0].max().item() + 1)
+    w = int(coords[:, 1].max().item() + 1)
+    loss_image = np.zeros((h, w), dtype=np.float32)
+    loss_image[coords[:, 0].numpy(), coords[:, 1].numpy()] = losses
+
+    save_root = Path(getattr(sampler, "save_samples_path", "./sampled_frames"))
+    save_dir = save_root / f"validation_i{step}"
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    #save one loss image
+    fig, ax = plt.subplots(figsize=(7, 6))
+    ax.imshow(loss_image, cmap="hot", origin="lower")
+    ax.set_title(f"Validation Loss Heatmap (step={step})")
+    ax.set_axis_off()
+    fig.tight_layout()
+    fig.savefig(str(save_dir / "loss_heatmap.png"), dpi=200, bbox_inches="tight")
+    plt.close(fig)
+
+    # Save sampled points overlaid on the loss image, with grid overlays when available.
+    fig, ax = plt.subplots(figsize=(7, 6))
+
+    # Use the quadtree draw helper for adaptive sampling.
+    is_adaptive = getattr(sampler, "sample_type", None) == "2d_grid_adaptive"
+    cached_grid = getattr(sampler, "cached_grid", None)
+    if is_adaptive and cached_grid is not None:
+        cached_grid.draw_with_image(loss_image, ax=ax, show_cells=True, cell_alpha=0.3)
+    else:
+        ax.imshow(loss_image, cmap="hot", origin="lower")
+
+    # For linear-grid samplers, draw the current linearly scheduled grid.
+    if getattr(sampler, "sample_type", None) in ("2d_grid_linear", "2d_grid_linear_weighted"):
+        _draw_linear_grid_overlay(ax, sampler)
+
+    if sampled_coords.size > 0:
+        ax.scatter(sampled_coords[:, 1], sampled_coords[:, 0], c="cyan", s=2, alpha=0.85)
+
+    ax.set_title(f"Validation Sampling Dynamics (step={step})")
+    ax.set_axis_off()
+
+    fig.tight_layout()
+    fig.savefig(str(save_dir / "loss_with_samples.png"), dpi=200, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _draw_linear_grid_overlay(ax, sampler):
+    """Draw linear-grid cell rectangles from sampler cached bounds."""
+    bounds = getattr(sampler, "cached_linear_bounds", None)
+    if bounds is None or bounds.numel() == 0:
+        return
+
+    import matplotlib.patches as patches
+
+    bounds_np = bounds.cpu().numpy()
+    for x_low, x_high, y_low, y_high in bounds_np:
+        rect = patches.Rectangle(
+            (x_low, y_low),
+            x_high - x_low + 1,
+            y_high - y_low + 1,
+            linewidth=0.2,
+            edgecolor="lime",
+            facecolor="none",
+            alpha=0.3,
+        )
+        ax.add_patch(rect)
 
 def get_grad_norm(model):
     grads = []

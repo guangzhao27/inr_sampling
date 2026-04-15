@@ -155,30 +155,31 @@ class HierarchicalImageGrid:
             device: torch device ('cpu', 'cuda', etc.)
             
         Returns:
-            tuple: (bounds, cell_sizes)
+            tuple: (bounds, cell_areas, cell_values)
                 bounds: Tensor of shape (n_bins, 4) where each row is [x_start, x_end, y_start, y_end]
                         All boundaries are INCLUSIVE
-                cell_sizes: List of cell areas
+                cell_areas: List of cell areas
+                cell_values: List of cell value estimating cell variance of gradient or loss times area 
         """
         self.evaluate_cells(evaluation_function, use_cache=True, batch_mode=True)
         leaf_cells = self.get_leaf_cells()
         
         # Extract bounds for each cell (all inclusive)
         bounds_list = []
-        cell_size = []
+        cell_area = []
         cell_values = []
         for cell in leaf_cells:
             bounds_list.append([cell.x_start, cell.x_end, cell.y_start, cell.y_end])
-            cell_size.append(cell.area)
+            cell_area.append(cell.area)
             
             assert cell.cell_value is not None, "Cell value not evaluated yet."
             cell_values.append(cell.cell_value)
         # Convert to tensor
         bounds = torch.tensor(bounds_list, device=device)
-        cell_size = torch.tensor(cell_size, device=device)
+        cell_area = torch.tensor(cell_area, device=device)
         cell_values = torch.tensor(cell_values, device=device)
         
-        return bounds, cell_size, cell_values
+        return bounds, cell_area, cell_values
     
     def get_leaf_centers_tensor(self, device='cpu', dtype=None):
         """
@@ -502,7 +503,7 @@ class HierarchicalImageGrid:
             print_cell(cell, 1)
     
     def draw_with_image(self, image, ax=None, show_cells=True, cell_alpha=0.3, 
-                       figsize=(12, 10)):
+                       figsize=(12, 10), cmap='hot'):
         """
         Draw the grid overlay on top of an actual image.
         
@@ -512,6 +513,7 @@ class HierarchicalImageGrid:
             show_cells: whether to show cell boundaries
             cell_alpha: transparency of cell overlays
             figsize: figure size if creating new figure
+            cmap: colormap for the image
         """
         import matplotlib.pyplot as plt
         import matplotlib.patches as patches
@@ -520,7 +522,7 @@ class HierarchicalImageGrid:
             fig, ax = plt.subplots(1, 1, figsize=figsize)
         
         # Display the image
-        ax.imshow(image, aspect='equal')
+        ax.imshow(image, aspect='equal', cmap=cmap)
         
         if show_cells:
             leaf_cells = self.get_leaf_cells()
@@ -533,7 +535,7 @@ class HierarchicalImageGrid:
                 rect = patches.Rectangle(
                     (x, y), width, height,
                     linewidth=2,
-                    edgecolor='red',
+                    edgecolor='blue',
                     facecolor='none',
                     alpha=cell_alpha
                 )

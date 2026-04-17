@@ -6,6 +6,7 @@ import os
 
 # from coral.fourier_features import ModulatedFourierFeatures
 # from coral.mfn import FourierNet, HyperMultiscaleBACON
+from .fourier_mlp import FourierFeatureMLP
 from .siren import ModulatedSiren, ModulatedSSN, Siren
 
 # NAME_TO_CLASS = {
@@ -57,7 +58,19 @@ def create_inr_instance(cfg, input_dim=1, output_dim=1, device="cuda"):
             w0=cfg.inr.w0,
             w0_initial=cfg.inr.w0,
             use_bias=True,
-        )
+        ).to(device)
+
+    elif cfg.inr.model_type in {"single_image_fourier_mlp", "fourier_feature_mlp"}:
+        inr = FourierFeatureMLP(
+            dim_in=input_dim,
+            dim_hidden=cfg.inr.hidden_dim,
+            dim_out=output_dim,
+            num_layers=cfg.inr.depth,
+            mapping_size=getattr(cfg.inr, "fourier_mapping_size", 256),
+            scale=getattr(cfg.inr, "fourier_scale", 10.0),
+            include_input=getattr(cfg.inr, "fourier_include_input", True),
+            activation=getattr(cfg.inr, "fourier_activation", "relu"),
+        ).to(device)
     # elif cfg.inr.model_type == "mfn":
     #     inr = FourierNet(
     #         input_dim,

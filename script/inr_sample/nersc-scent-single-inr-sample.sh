@@ -15,7 +15,7 @@ source ~/anaconda3/etc/profile.d/conda.sh
 conda activate torchgeo
 
 w0=30
-sampling_rate=2e-3
+sampling_rate=1e-3
 train_ratio=1
 inner_steps=6
 lr=1e-4 # 5.6e-5 non full 
@@ -30,17 +30,19 @@ data_path="/pscratch/sd/g/gzhao27/INR/INR_SAMPLE/data/NS2d/ns_data_res2048_re${r
 # # for time_frame in 100 120 140 160 180 200; do
 # #   for sample_type in NMT random 2d_grid_linear EVOS; do
 for time_frame in 100; do
-  for sample_type in 2d_grid_adaptive; do
-    for adaptive_weight_mode in sampled_dif; do
-    run_name="NS1024_single_${sample_type}_re_${re}_sampling_${sampling_rate}_lr_${lr}_depth_${depth}_t${time_frame}_${adaptive_weight_mode}"
+  for sample_type in random 2d_grid_linear 2d_grid_adaptive; do
+    for adaptive_weight_mode in none; do
+      for model_type in single_image_fourier_mlp; do
+    run_name="NS1024_${model_type}_single_${sample_type}_re_${re}_sampling_${sampling_rate}_lr_${lr}_depth_${depth}_t${time_frame}_${adaptive_weight_mode}"
 
     python inr_sample/single_image_inr.py \
         data.dataset_name=NS \
-        inr.model_type=siren \
+        inr.model_type=$model_type \
+        inr.fourier_scale=20.0 \
         data.space_factor=1 \
         optim.batch_size=2 \
         optim.lr_inr=$lr \
-        optim.epochs=3000 \
+        optim.epochs=5000 \
         optim.inner_steps=$inner_steps \
         optim.evo_every_epochs=100 \
         inr.latent_dim=256 \
@@ -53,6 +55,7 @@ for time_frame in 100; do
         inr.w0=$w0 \
         sampling.rate=$sampling_rate \
         sampling.type=$sample_type \
+        sampling.adaptive_equal_cell_topk=True \
         sampling.sample_num_schedular=constant \
         sampling.mutation_method=constant \
         sampling.profile_interval_method=lin_dec \
@@ -66,6 +69,7 @@ for time_frame in 100; do
         data.data_path=$data_path \
         data.data_type=other \
         data.single_time_frame=${time_frame}
+      done
   done
 done
 done

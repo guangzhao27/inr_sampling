@@ -73,11 +73,15 @@ optim:
   evo_every_epochs: 100
 
 inr:
-  model_type : "siren"
+  model_type : "siren"  # supported: siren, ssn, single_image_siren, single_image_fourier_mlp
   latent_dim : 256
   depth : 5
   hidden_dim : 256
   w0 : 30.0
+  fourier_mapping_size: 256
+  fourier_scale: 10.0
+  fourier_include_input: True
+  fourier_activation: "relu"
   use_latent: True
   modulate_scale: False
   modulate_shift: True

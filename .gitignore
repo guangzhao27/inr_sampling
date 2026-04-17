@@ -13,7 +13,6 @@ __pycache__/
 *.json
 *.out
 /Results/*
-/.github/*
 /outputs/*
 /data/*
 /checkpoints/*

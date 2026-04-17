@@ -109,7 +109,11 @@ wandb:
 sampling:
   type: "random"
   rate: 0.2
-  adaptive_mode: "loss"            # only used by sampling.type=2d_grid_adaptive: "gradient", "loss", or "loss_true"
+  adaptive_mode: "loss"            # only used by sampling.type=2d_grid_adaptive: "gradient", "loss", "loss_no_sqrt", or "loss_true"
+  adaptive_iterations: 8            # only used by sampling.type=2d_grid_adaptive: quadtree iterative subdivision depth
+  adaptive_equal_cell_topk: False   # only used by 2d_grid_adaptive: keep global top-k by prediction dif from sampled candidates
+  adaptive_equal_cell_topk_count_mode: "same"  # only used when adaptive_equal_cell_topk=True: "same" or "poisson"
+  adaptive_equal_cell_topk_weight_mode: "none" # only used when adaptive_equal_cell_topk=True: "none" or "area_over_count"
   adaptive_weight_mode: "inverse_value"  # only used by 2d_grid_adaptive: "none", "inverse_value", "area_over_count", "sampled_dif"
   adaptive_weight_value_eps: 1e-6   # denominator clamp for inverse_value mode
   adaptive_weight_clip_ratio: 10.0  # clip per-cell weights to median*ratio; <=0 disables clipping

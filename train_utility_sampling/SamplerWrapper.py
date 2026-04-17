@@ -680,7 +680,11 @@ class INRSingle2dAdaptiveSamplerWrapper(InrSamplerWrapper):
         weight_mode: str = "inverse_value",
         weight_value_eps: float = 1e-6,
         weight_clip_ratio: float = 10.0,
+        equal_cell_topk: bool = False,
+        equal_cell_topk_count_mode: str = "same",
+        equal_cell_topk_weight_mode: str = "none",
         grid_update_interval: int = 100,
+        adaptive_iterations: int = 8,
         save_samples_path: Path = Path("logs/sampling"),
         save_interval: int = 100,
         image_width: int = 512,
@@ -704,7 +708,26 @@ class INRSingle2dAdaptiveSamplerWrapper(InrSamplerWrapper):
         self.weight_mode = weight_mode
         self.weight_value_eps = float(weight_value_eps)
         self.weight_clip_ratio = float(weight_clip_ratio)
+        self.equal_cell_topk = bool(equal_cell_topk)
+
+        valid_count_modes = {"same", "poisson"}
+        if equal_cell_topk_count_mode not in valid_count_modes:
+            raise ValueError(
+                "Unknown equal_cell_topk_count_mode "
+                f"'{equal_cell_topk_count_mode}'. Expected one of {sorted(valid_count_modes)}"
+            )
+        self.equal_cell_topk_count_mode = equal_cell_topk_count_mode
+
+        valid_equal_topk_weight_modes = {"none", "area_over_count"}
+        if equal_cell_topk_weight_mode not in valid_equal_topk_weight_modes:
+            raise ValueError(
+                "Unknown equal_cell_topk_weight_mode "
+                f"'{equal_cell_topk_weight_mode}'. Expected one of {sorted(valid_equal_topk_weight_modes)}"
+            )
+        self.equal_cell_topk_weight_mode = equal_cell_topk_weight_mode
+
         self.grid_update_interval = max(1, int(grid_update_interval))
+        self.adaptive_iterations = max(1, int(adaptive_iterations))
         
         # Store graph reference for evaluation function
         self.cached_graph = None
@@ -749,7 +772,7 @@ class INRSingle2dAdaptiveSamplerWrapper(InrSamplerWrapper):
         grid = HierarchicalImageGrid(self.image_width, self.image_width, initial_grid_size=8)
         grid.iterative_subdivision(
             eval_fn,
-            iterations=8,
+            iterations=self.adaptive_iterations,
             percentage=20,
             batch_mode=True,
         )
@@ -825,6 +848,14 @@ class INRSingle2dAdaptiveSamplerWrapper(InrSamplerWrapper):
                 cell_value = loss_variance.sqrt() * cell_areas_tensor
                 return cell_value.tolist()
 
+            if mode == 'loss_no_sqrt':
+                loss_variance = cell_loss_variance_estimate_with_random_sampling(
+                    cell_coords_tensor, graph, self.model, self.device
+                )
+
+                cell_value = loss_variance * cell_areas_tensor
+                return cell_value.tolist()
+
             raise ValueError(f"Unknown adaptive evaluation mode: {mode}")
         
         return evaluate_cells
@@ -867,9 +898,18 @@ class INRSingle2dAdaptiveSamplerWrapper(InrSamplerWrapper):
             values = self.cached_values
         # values is loss_variance.sqrt() * cell_areas_tensor
         
-        counts = sample_counts_poisson(values, expected_total=n_samples)
         n_cells = bounds.shape[0]
-        
+
+        if self.equal_cell_topk:
+            # Match linear-grid behavior: draw the same number of points per cell,
+            # then keep only global top-k by model prediction difference.
+            if self.equal_cell_topk_count_mode == "same":
+                n_per_cell = max(1, math.ceil(n_samples / n_cells))
+                counts = torch.full((n_cells,), n_per_cell, dtype=torch.long, device=self.device)
+            else:
+                counts = sample_counts_poisson(values, expected_total=n_samples)
+        else:
+            counts = sample_counts_poisson(values, expected_total=n_samples)
         # Sample coordinates from cells (bounds are now inclusive)
         samples_xy, cell_ids, ptr = sample_variable_from_2d_intervals_vcounts(bounds, counts, device=self.device)
         
@@ -878,11 +918,50 @@ class INRSingle2dAdaptiveSamplerWrapper(InrSamplerWrapper):
         y_coords = samples_xy[:, 1]  # (total_samples,)
         sampled_idx = y_coords * self.image_width + x_coords  # (total_samples,)
 
+        graph_on_device = graph.to(self.device)
+
+        if self.equal_cell_topk:
+            with torch.no_grad():
+                space_emb = graph_on_device.space_emb[sampled_idx]
+                feats = graph_on_device.feat[sampled_idx]
+                preds = self.model(space_emb)
+                sampled_dif = torch.sum((feats - preds).abs(), dim=1)
+
+            keep_k = min(n_samples, sampled_dif.numel())
+            _, topk_local = torch.topk(sampled_dif, keep_k)
+            selected_idx = sampled_idx[topk_local]
+
+            sampled_data_kwargs = dict(
+                cor=graph_on_device.cor[selected_idx],
+                time=graph_on_device.time[selected_idx],
+                feat=graph_on_device.feat[selected_idx],
+                space_emb=graph_on_device.space_emb[selected_idx],
+            )
+
+            if self.equal_cell_topk_weight_mode == "area_over_count":
+                counts_f = counts.to(torch.float32).clamp_min(1.0)
+                cell_area_f = cell_area.to(torch.float32).clamp_min(1.0)
+                per_cell_weight = cell_area_f / counts_f
+                per_cell_weight = self._normalize_and_clip_cell_weights(per_cell_weight)
+                selected_cell_ids = cell_ids[topk_local]
+                sampled_data_kwargs["weight"] = per_cell_weight[selected_cell_ids]
+            
+            # randomly show some samples weight, loss value, cell area, cell count for debugging
+            if False:
+                num_debug_samples = min(5, len(selected_idx))
+                debug_indices = torch.randperm(len(selected_idx))[:num_debug_samples]
+                for i in debug_indices:
+                    print(f"Sample {i}: weight={sampled_data_kwargs['weight'][i].item()}, "
+                          f"loss={sampled_dif[topk_local[i]].item()}, "
+                          f"cell_area={cell_area[selected_cell_ids[i]].item()}, "
+                          f"cell_count={counts[selected_cell_ids[i]].item()}")
+
+            sampled_graph = Data(**sampled_data_kwargs)
+            return sampled_graph.to(self.device)
+
         counts_f = counts.to(torch.float32)
         cell_area_f = cell_area.to(torch.float32)
         values_f = values.to(torch.float32)
-
-        graph_on_device = graph.to(self.device)
 
         if self.weight_mode == "sampled_dif":
             with torch.no_grad():
@@ -899,7 +978,7 @@ class INRSingle2dAdaptiveSamplerWrapper(InrSamplerWrapper):
                 per_cell_weight = cell_area_f / values_safe
             elif self.weight_mode == "area_over_count":
                 counts_safe = counts_f.clamp_min(1.0)
-                per_cell_weight = values_f / cell_area_f
+                per_cell_weight = counts_safe / cell_area_f.clamp_min(1.0)
             else:
                 raise ValueError(f"Unsupported weight_mode: {self.weight_mode}")
             per_cell_weight = self._normalize_and_clip_cell_weights(per_cell_weight)
@@ -1488,7 +1567,11 @@ def create_inr_sampler(cfg, inr, graph, current_date_str, run_name, device='cuda
             weight_mode=cfg.sampling.adaptive_weight_mode,
             weight_value_eps=cfg.sampling.get("adaptive_weight_value_eps", 1e-6),
             weight_clip_ratio=cfg.sampling.get("adaptive_weight_clip_ratio", 10.0),
+            equal_cell_topk=cfg.sampling.get("adaptive_equal_cell_topk", False),
+            equal_cell_topk_count_mode=cfg.sampling.get("adaptive_equal_cell_topk_count_mode", "same"),
+            equal_cell_topk_weight_mode=cfg.sampling.get("adaptive_equal_cell_topk_weight_mode", "none"),
             grid_update_interval=cfg.sampling.get("adaptive_grid_update_interval", 100),
+            adaptive_iterations=cfg.sampling.get("adaptive_iterations", 8),
             save_samples_path=save_path,
             image_width = image_width
         )

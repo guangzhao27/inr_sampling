@@ -41,9 +41,11 @@ class Sampler(object):
         fix_seed(self.args.seed)
     
     def _init_sampler(self):
-    
-        elif self.args.strategy == "evos":
+        # TODO: Complete this method - currently incomplete
+        if self.args.strategy == "evos":
             self._evos_init()
+        else:
+            pass  # Other strategies not yet implemented
 
     def _evos_init(self):
         if self.args.lap_coff > 0 or self.args.crossover_method != "no":
@@ -62,20 +64,18 @@ class Sampler(object):
 
         _st = self.args.strategy
 
-        elif _st == "evos":
+        if _st == "evos":
             if self._evos_is_fitness_eval_iter(epoch):
+                self._recover_rng()
                 return coords, gt
             else:
                 selection_mask = self._evos_get_selection_mask(epoch)
                 _coords = self.full_coords[selection_mask]
                 _gt = self.full_gt[selection_mask]
+                self._recover_rng()
                 return _coords, _gt
-
         else:
             raise NotImplementedError
-
-        self._recover_rng()
-        return _coords, _gt
 
     def _sampler_compute_loss(self, pred, gt, epoch):
         _st = self.args.strategy

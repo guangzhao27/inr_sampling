@@ -450,6 +450,7 @@ def single_image_step(
     cfg=None,
 ):
     step = iter
+    total_points = int(graph_ori.space_emb.shape[0])
 
     # t0 = time()
     if sampler is not None:
@@ -463,6 +464,13 @@ def single_image_step(
             )
     else:
         graph = graph_ori
+
+    sampled_points = int(graph.space_emb.shape[0])
+    sampled_ratio = (sampled_points / total_points) if total_points > 0 else 0.0
+    if sampler is not None:
+        sampler.last_sampled_points = sampled_points
+        sampler.last_sampled_ratio = sampled_ratio
+
     features = graph.feat
     coords = graph.space_emb
     if not is_train:

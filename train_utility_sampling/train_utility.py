@@ -317,7 +317,7 @@ def train_step_single_image(step, graph, inr, device,
 
 def validation_step_single_image(step, graph, inr, device, 
                use_rel_loss, optimizer, 
-               sampler=None, cfg=None
+               visualization_sampler=None, cfg=None
                ):
     
     inr.eval()
@@ -345,12 +345,12 @@ def validation_step_single_image(step, graph, inr, device,
     psnr_score = outputs['psnr']
     ssim_score = outputs['ssim']
 
-    if sampler is not None:
+    if visualization_sampler is not None:
         _save_validation_sampling_dynamics(
             step=step,
             graph=graph,
             inr=inr,
-            sampler=sampler,
+            sampler=visualization_sampler,
             cfg=cfg,
         )
         
@@ -370,12 +370,13 @@ def _sample_with_current_sampler(step: int, graph: Data, sampler, cfg):
 
 
 def _save_validation_sampling_dynamics(step: int, graph: Data, inr, sampler, cfg=None):
-    """Save per-pixel loss heatmap with sampled points and adaptive grid overlays."""
+    """Save loss-only, loss+samples, and loss+partitions visualizations."""
     if not hasattr(graph, "cor") or not hasattr(graph, "space_emb") or not hasattr(graph, "feat"):
         return
 
     with torch.no_grad():
         pred = inr(graph.space_emb)
+        # Keep raw per-pixel MSE values for visualization (no log scaling).
         pixel_loss = (pred - graph.feat).pow(2).flatten()
 
     coords = graph.cor.long().detach().cpu()
@@ -393,39 +394,83 @@ def _save_validation_sampling_dynamics(step: int, graph: Data, inr, sampler, cfg
     save_dir = save_root / f"validation_i{step}"
     save_dir.mkdir(parents=True, exist_ok=True)
 
-    #save one loss image
+    # Keep color scaling consistent across all saved loss images.
+    vmin = float(loss_image.min())
+    vmax = float(loss_image.max())
+    if vmax <= vmin:
+        vmax = vmin + 1e-12
+
+    # a) Save raw loss image.
     fig, ax = plt.subplots(figsize=(7, 6))
-    ax.imshow(loss_image, cmap="hot", origin="lower")
-    ax.set_title(f"Validation Loss Heatmap (step={step})")
+    im = ax.imshow(loss_image, cmap="hot", origin="lower", vmin=vmin, vmax=vmax)
+    ax.set_title(f"Validation Loss Heatmap (raw, step={step})")
     ax.set_axis_off()
+    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label="Per-pixel MSE")
     fig.tight_layout()
     fig.savefig(str(save_dir / "loss_heatmap.png"), dpi=200, bbox_inches="tight")
     plt.close(fig)
 
-    # Save sampled points overlaid on the loss image, with grid overlays when available.
+    # b) Save loss image with sampled points only.
     fig, ax = plt.subplots(figsize=(7, 6))
-
-    # Use the quadtree draw helper for adaptive sampling.
-    is_adaptive = getattr(sampler, "sample_type", None) == "2d_grid_adaptive"
-    cached_grid = getattr(sampler, "cached_grid", None)
-    if is_adaptive and cached_grid is not None:
-        cached_grid.draw_with_image(loss_image, ax=ax, show_cells=True, cell_alpha=0.3)
-    else:
-        ax.imshow(loss_image, cmap="hot", origin="lower")
-
-    # For linear-grid samplers, draw the current linearly scheduled grid.
-    if getattr(sampler, "sample_type", None) in ("2d_grid_linear", "2d_grid_linear_weighted"):
-        _draw_linear_grid_overlay(ax, sampler)
+    im = ax.imshow(loss_image, cmap="hot", origin="lower", vmin=vmin, vmax=vmax)
 
     if sampled_coords.size > 0:
         ax.scatter(sampled_coords[:, 1], sampled_coords[:, 0], c="cyan", s=2, alpha=0.85)
 
-    ax.set_title(f"Validation Sampling Dynamics (step={step})")
+    ax.set_title(f"Validation Loss + Samples (step={step})")
     ax.set_axis_off()
+    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label="Per-pixel MSE")
 
     fig.tight_layout()
     fig.savefig(str(save_dir / "loss_with_samples.png"), dpi=200, bbox_inches="tight")
     plt.close(fig)
+
+    # c) Save loss image with partition overlays when available.
+    fig, ax = plt.subplots(figsize=(7, 6))
+    im = ax.imshow(loss_image, cmap="hot", origin="lower", vmin=vmin, vmax=vmax)
+
+    has_partition_overlay = False
+    if getattr(sampler, "sample_type", None) == "2d_grid_adaptive":
+        cached_grid = getattr(sampler, "cached_grid", None)
+        if cached_grid is not None:
+            _draw_adaptive_grid_overlay(ax, cached_grid)
+            has_partition_overlay = True
+
+    if getattr(sampler, "sample_type", None) in ("2d_grid_linear", "2d_grid_linear_weighted"):
+        _draw_linear_grid_overlay(ax, sampler)
+        has_partition_overlay = True
+
+    if has_partition_overlay:
+        ax.set_title(f"Validation Loss + Partitions (step={step})")
+    else:
+        ax.set_title(f"Validation Loss (no partitions, step={step})")
+
+    ax.set_axis_off()
+    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label="Per-pixel MSE")
+    fig.tight_layout()
+    fig.savefig(str(save_dir / "loss_with_partitions.png"), dpi=200, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _draw_adaptive_grid_overlay(ax, grid):
+    """Draw adaptive quadtree leaf-cell rectangles on an existing axis."""
+    if grid is None:
+        return
+
+    import matplotlib.patches as patches
+
+    leaf_cells = grid.get_leaf_cells()
+    for cell in leaf_cells:
+        rect = patches.Rectangle(
+            (cell.x_start, cell.y_start),
+            cell.width,
+            cell.height,
+            linewidth=1.2,
+            edgecolor="blue",
+            facecolor="none",
+            alpha=0.35,
+        )
+        ax.add_patch(rect)
 
 
 def _draw_linear_grid_overlay(ax, sampler):

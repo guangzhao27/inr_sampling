@@ -14,8 +14,7 @@ from omegaconf import DictConfig, OmegaConf
 from utils.data.unstructure_dataset import (
     GraphNavierStokes, 
     collate_graph_inr, 
-    create_burgers_dataset, 
-    create_soma_dataset,
+    create_burgers2d_dataset, 
     create_ns_dataset,
     )
 from train_utility_sampling.train_utility import (

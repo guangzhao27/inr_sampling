@@ -403,6 +403,12 @@ def main(cfg: DictConfig) -> None:
             sampler=inr_sampler,
             cfg = cfg
             )
+        sampled_points = int(
+            getattr(inr_sampler, "last_sampled_points", graph.space_emb.shape[0])
+        ) if inr_sampler is not None else int(graph.space_emb.shape[0])
+        sampled_ratio = float(
+            getattr(inr_sampler, "last_sampled_ratio", 1.0)
+        ) if inr_sampler is not None else 1.0
         t_step = time() - t1
         # print("total train time for step", step, ":", t_step)
         total_train_time += t_step
@@ -434,7 +440,7 @@ def main(cfg: DictConfig) -> None:
                 device=device, 
                 use_rel_loss=use_rel_loss,
                 optimizer=optimizer,
-                sampler=inr_sampler,
+                visualization_sampler=inr_sampler,
                 cfg = cfg
                 )
 
@@ -448,6 +454,8 @@ def main(cfg: DictConfig) -> None:
                         "Time": total_train_time, 
                         "psnr": psnr,
                         "ssim": ssim,
+                        "sampled_points": sampled_points,
+                        "sampled_ratio": sampled_ratio,
                         "max_gpu_memory_GB": torch.cuda.max_memory_allocated() / 1e9,
                     },
                     step=step
@@ -460,7 +468,8 @@ def main(cfg: DictConfig) -> None:
                     f"Step {step}, Train Loss: {train_loss:.4f}, "
                     f"Test Loss: {test_loss:.4f}, "
                     f"Train Rel Loss: {rel_train_loss:.4f}, "
-                    f"Test Rel Loss: {rel_test_loss:.4f}"
+                    f"Test Rel Loss: {rel_test_loss:.4f}, "
+                    f"Sampled Points: {sampled_points} ({sampled_ratio:.4f})"
                 )
             loss_to_check = rel_test_loss if use_rel_loss else test_loss
             if loss_to_check < best_loss:

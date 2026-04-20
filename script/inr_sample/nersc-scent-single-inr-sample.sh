@@ -7,13 +7,6 @@
 #SBATCH --gpus-per-node=1
 #SBATCH --account=m2956_g
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-
-cd "$REPO_ROOT"
-source ~/anaconda3/etc/profile.d/conda.sh
-conda activate torchgeo
-
 w0=30
 sampling_rate=2e-3
 train_ratio=1
@@ -23,7 +16,26 @@ depth=6
 n_start=11
 n_finish=128
 re=10000
-data_path="/pscratch/sd/g/gzhao27/INR/INR_SAMPLE/data/NS2d/ns_data_res2048_re${re}_7.npy"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+
+cd "$REPO_ROOT"
+
+HOST=$(hostname -f)
+if [[ $HOST == *"bnl"* ]]; then
+  source ~/.bashrc
+  conda activate /sdcc/u/gzhao/scratch/conda/inr_sampling
+  wandb offline
+  data_path="/sdcc/u/gzhao/scratch/inr_sampling/data/NS2d/ns_data_res2048_re${re}_7.npy"
+else
+  source ~/anaconda3/etc/profile.d/conda.sh
+  conda activate torchgeo
+  data_path="/pscratch/sd/g/gzhao27/INR/INR_SAMPLE/data/NS2d/ns_data_res2048_re${re}_7.npy"
+
+fi
+
+
 # null NMT random 2d_cluster_slic 2d_grid_linear EVOS
 # # for time_frame in 100 120 140 160 180 200; do
 # #   for sample_type in NMT random 2d_grid_linear EVOS; do

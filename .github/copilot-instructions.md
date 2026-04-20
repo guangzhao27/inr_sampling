@@ -282,6 +282,17 @@ Single-image training path reports MSE, relative RMSE, PSNR, SSIM during validat
 
 ### 8) Visualize Sampled Points / Learned Fields
 - During training, sampled frames are saved under `sampled_frames/` and `inr_sample/sampled_frames/`.
+- During validation in single-image flow, each eval step now creates
+  `.../validation_i{step}/` under the sampler save root and writes:
+  - `loss_heatmap.png`
+  - `loss_with_samples.png`
+  - `loss_with_partitions.png`
+  - `reconstruction_data.npz` (for Python-side reconstruction without rerunning inference)
+- `reconstruction_data.npz` currently includes:
+  - metadata: `step`, `height`, `width`
+  - coordinates: `coords`, `sampled_coords`
+  - vector values: `gt_values`, `pred_values`, `loss_values`
+  - rasterized images: `gt_image`, `pred_image`, `loss_image`
 - Use existing notebooks for qualitative analysis:
   - `inr_sample/inr_sampling_show.ipynb`
   - `inr_sample/qualitative_illustration.ipynb`

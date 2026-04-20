@@ -265,6 +265,7 @@ def main(cfg: DictConfig) -> None:
         batch_size if cfg.optim.batch_size_val == None else cfg.optim.batch_size_val
     )
     lr_inr = cfg.optim.lr_inr  # lr_inr is learning parameter initial value, also the meta learning rate
+    optimizer_name = str(cfg.optim.get("optimizer", "adamw")).lower()
     lr_code = cfg.optim.lr_code 
     meta_lr_code = cfg.optim.meta_lr_code # meta learning rate to learn
     weight_decay_code = cfg.optim.weight_decay_code
@@ -323,14 +324,30 @@ def main(cfg: DictConfig) -> None:
     meta_lr_code = meta_lr_code
     weight_decay_lr_code = weight_decay_code
 
-    optimizer = torch.optim.AdamW(
-        [
-            {"params": inr.parameters(), "lr": lr_inr},
-            {"params": alpha, "lr": meta_lr_code, "weight_decay": weight_decay_lr_code},
-        ],
-        lr=lr_inr,
-        weight_decay=0,
-    )
+    param_groups = [
+        {"params": inr.parameters(), "lr": lr_inr},
+        {"params": alpha, "lr": meta_lr_code, "weight_decay": weight_decay_lr_code},
+    ]
+
+    if optimizer_name == "adamw":
+        optimizer = torch.optim.AdamW(
+            param_groups,
+            lr=lr_inr,
+            weight_decay=float(cfg.optim.get("adamw_weight_decay", 0.0)),
+        )
+    elif optimizer_name == "sgd":
+        optimizer = torch.optim.SGD(
+            param_groups,
+            lr=lr_inr,
+            momentum=float(cfg.optim.get("sgd_momentum", 0.9)),
+            dampening=float(cfg.optim.get("sgd_dampening", 0.0)),
+            weight_decay=float(cfg.optim.get("sgd_weight_decay", 0.0)),
+            nesterov=bool(cfg.optim.get("sgd_nesterov", False)),
+        )
+    else:
+        raise ValueError(
+            f"Unsupported optim.optimizer='{optimizer_name}'. Supported values: adamw, sgd"
+        )
     if cfg.sampling.type == "EVOS":
         epoch_start = 1
     else:   # EVOS uses 1 based indexing for epochs
@@ -472,20 +489,38 @@ def main(cfg: DictConfig) -> None:
                     f"Sampled Points: {sampled_points} ({sampled_ratio:.4f})"
                 )
             loss_to_check = rel_test_loss if use_rel_loss else test_loss
+            dir_path = REPO_ROOT / "Results" / "checkpoints" / f"{current_date_str + run_name_str}"
+            dir_path.mkdir(parents=True, exist_ok=True)
+
+            # Build graph snapshot (CPU) for visualization/reconstruction scripts.
+            _graph_data = {
+                "cor": graph_ori.cor.detach().cpu(),
+                "space_emb": graph_ori.space_emb.detach().cpu(),
+                "feat": graph_ori.feat.detach().cpu(),
+                "time": graph_ori.time.detach().cpu(),
+            }
+
+            # Save one checkpoint for every evaluation step.
+            _eval_ckpt = {
+                "cfg": cfg,
+                "epoch": step,
+                "inr": inr.state_dict(),
+                "optimizer_inr": optimizer.state_dict(),
+                "loss": loss_to_check,
+                "best_loss": best_loss,
+                "alpha": alpha,
+                "feat_transform": feat_transform,
+                "feat_inv_transform": feat_inv_transform,
+                "input_dim": input_dim,
+                "output_dim": output_dim,
+                "graph_data": _graph_data,
+            }
+            _eval_savepath = dir_path / f"eval_{step}.pt"
+            torch.save(_eval_ckpt, str(_eval_savepath))
+
             if loss_to_check < best_loss:
                 best_loss = loss_to_check
-
-                dir_path = REPO_ROOT / "Results" / "checkpoints" / f"{current_date_str + run_name_str}"
-                dir_path.mkdir(parents=True, exist_ok=True)
                 savepath = dir_path / f"{step}.pt"
-
-                # Build graph snapshot (CPU) for visualization
-                _graph_data = {
-                    "cor": graph_ori.cor.detach().cpu(),
-                    "space_emb": graph_ori.space_emb.detach().cpu(),
-                    "feat": graph_ori.feat.detach().cpu(),
-                    "time": graph_ori.time.detach().cpu(),
-                }
 
                 _ckpt = {
                     "cfg": cfg,

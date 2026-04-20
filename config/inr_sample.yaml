@@ -62,9 +62,15 @@ data:
   piecewise_eps:  0.02        # smoothing width for step indicator; null = hard step
 
 optim:
+  optimizer: adamw   # supported: adamw, sgd
   batch_size: 32
   batch_size_val: 
   lr_inr : 0.000005
+  adamw_weight_decay: 0.0
+  sgd_momentum: 0.9
+  sgd_dampening: 0.0
+  sgd_weight_decay: 0.0
+  sgd_nesterov: False
   lr_code : 0.01
   meta_lr_code : 0.000005
   weight_decay_code: 0

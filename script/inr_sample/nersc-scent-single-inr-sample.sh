@@ -16,17 +16,21 @@ conda activate torchgeo
 
 w0=30
 sampling_rate=2e-3
+sampling_rate=2e-3
 train_ratio=1
 inner_steps=6
-lr=1e-4 # 5.6e-5 non full 
+lr=3e-4 # 5.6e-5 non full 
 depth=6
 n_start=11
 n_finish=128
 re=10000
+sgd_momentum=0.9
+sgd_nesterov=True
 data_path="/pscratch/sd/g/gzhao27/INR/INR_SAMPLE/data/NS2d/ns_data_res2048_re${re}_7.npy"
 # null NMT random 2d_cluster_slic 2d_grid_linear EVOS
 # # for time_frame in 100 120 140 160 180 200; do
 # #   for sample_type in NMT random 2d_grid_linear EVOS; do
+# model_type choices: siren single_image_fourier_mlp
 for time_frame in 100; do
   for case_name in \
     random \
@@ -66,6 +70,9 @@ for time_frame in 100; do
         inr.model_type=siren \
         data.space_factor=1 \
         optim.batch_size=2 \
+        optim.optimizer=$optimizer_name \
+        optim.sgd_momentum=$sgd_momentum \
+        optim.sgd_nesterov=$sgd_nesterov \
         optim.lr_inr=$lr \
         optim.epochs=5000 \
         optim.inner_steps=$inner_steps \

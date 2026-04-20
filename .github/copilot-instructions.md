@@ -296,6 +296,52 @@ This script reproduces the paper plotting assets in `Results/`:
 - `traintime.pdf` (PSNR vs wall-clock training time)
 - `trainrel_loss.pdf` (Relative RMSE vs wall-clock training time)
 
+### 10) Analyze Gradient Variance/Correlation from Checkpoints
+Use the standalone analyzer to replay checkpoints with repeated sampling and
+track gradient stability over training iterations.
+
+```bash
+python script/inr_sample/gradient_trend_analysis.py \
+  --checkpoint-parent Results/checkpoints \
+  --sampler auto \
+  --n-repeats 4 \
+  --output-dir Results/gradient_trend_analysis
+```
+
+Notes:
+- `--sampler auto` keeps each checkpoint's sampler from saved config.
+- Set `--sampler random` / `NMT` / `2d_grid_linear` / `2d_grid_adaptive` to evaluate with a specific sampler.
+- The script expects numeric-step checkpoints (`0.pt`, `200.pt`, ...), writes per-run CSVs, sampler-aggregated CSVs, and plots:
+  - `gradient_variance_vs_step.png`
+  - `gradient_correlation_vs_step.png`
+  - `orthogonal_gradient_error_vs_step.png`
+
+Orthogonal gradient error definition used in analysis scripts:
+- Compute reference gradient with all points (no sampler) for each checkpoint.
+- For each sampled-run gradient `g`, project onto reference direction `g_ref`.
+- Orthogonal error is squared residual norm: `||g - proj_{g_ref}(g)||^2`.
+- Report per-checkpoint mean/std of this error across repeated sampling runs.
+
+For explicit four-case comparisons where multiple runs share the same sampler type
+(for example adaptive top-k variants), use run-level plotting:
+
+```bash
+python script/inr_sample/compare_four_runs_gradient_trend.py \
+  --checkpoint-parent Results/checkpoints \
+  --output-dir Results/gradient_trend_comparison_four_runs
+```
+
+This script keeps the following as separate curves by run label:
+- `random`
+- `2d_grid_linear`
+- `adaptive_topk_none`
+- `adaptive_topk_area_over_count`
+
+The four-run comparison script writes three images:
+- `gradient_variance_comparison.png`
+- `gradient_correlation_comparison.png`
+- `orthogonal_gradient_error_comparison.png`
+
 ## Coding Conventions
 - Follow PEP 8 and keep function/class names descriptive.
 - Add type hints on new public functions and sampler interfaces.

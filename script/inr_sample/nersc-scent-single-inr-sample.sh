@@ -15,30 +15,55 @@ source ~/anaconda3/etc/profile.d/conda.sh
 conda activate torchgeo
 
 w0=30
-sampling_rate=1e-3
+sampling_rate=2e-3
 train_ratio=1
 inner_steps=6
 lr=1e-4 # 5.6e-5 non full 
 depth=6
 n_start=11
 n_finish=128
-sample_type=NMT
-time_frame=200
 re=10000
 data_path="/pscratch/sd/g/gzhao27/INR/INR_SAMPLE/data/NS2d/ns_data_res2048_re${re}_7.npy"
 # null NMT random 2d_cluster_slic 2d_grid_linear EVOS
 # # for time_frame in 100 120 140 160 180 200; do
 # #   for sample_type in NMT random 2d_grid_linear EVOS; do
 for time_frame in 100; do
-  for sample_type in random 2d_grid_linear 2d_grid_adaptive; do
-    for adaptive_weight_mode in none; do
-      for model_type in single_image_fourier_mlp; do
-    run_name="NS1024_${model_type}_single_${sample_type}_re_${re}_sampling_${sampling_rate}_lr_${lr}_depth_${depth}_t${time_frame}_${adaptive_weight_mode}"
+  for case_name in \
+    random \
+    grid_linear \
+    adaptive_topk_none \
+    adaptive_topk_area_over_count; do
+
+    if [[ "$case_name" == "random" ]]; then
+      sample_type="random"
+      adaptive_equal_cell_topk="False"
+      adaptive_weight_mode="none"
+      adaptive_equal_cell_topk_weight_mode="none"
+    elif [[ "$case_name" == "grid_linear" ]]; then
+      sample_type="2d_grid_linear"
+      adaptive_equal_cell_topk="False"
+      adaptive_weight_mode="none"
+      adaptive_equal_cell_topk_weight_mode="none"
+    elif [[ "$case_name" == "adaptive_topk_none" ]]; then
+      sample_type="2d_grid_adaptive"
+      adaptive_equal_cell_topk="True"
+      adaptive_weight_mode="none"
+      adaptive_equal_cell_topk_weight_mode="none"
+    elif [[ "$case_name" == "adaptive_topk_area_over_count" ]]; then
+      sample_type="2d_grid_adaptive"
+      adaptive_equal_cell_topk="True"
+      adaptive_weight_mode="area_over_count"
+      adaptive_equal_cell_topk_weight_mode="area_over_count"
+    else
+      echo "Unknown case: $case_name"
+      continue
+    fi
+
+    run_name="NS1024_single_${case_name}_re_${re}_sampling_${sampling_rate}_lr_${lr}_depth_${depth}_t${time_frame}"
 
     python inr_sample/single_image_inr.py \
         data.dataset_name=NS \
-        inr.model_type=$model_type \
-        inr.fourier_scale=20.0 \
+        inr.model_type=siren \
         data.space_factor=1 \
         optim.batch_size=2 \
         optim.lr_inr=$lr \
@@ -55,12 +80,13 @@ for time_frame in 100; do
         inr.w0=$w0 \
         sampling.rate=$sampling_rate \
         sampling.type=$sample_type \
-        sampling.adaptive_equal_cell_topk=True \
         sampling.sample_num_schedular=constant \
         sampling.mutation_method=constant \
         sampling.profile_interval_method=lin_dec \
         sampling.profile_guide=value \
+        sampling.adaptive_equal_cell_topk=$adaptive_equal_cell_topk \
         sampling.adaptive_weight_mode=$adaptive_weight_mode \
+        sampling.adaptive_equal_cell_topk_weight_mode=$adaptive_equal_cell_topk_weight_mode \
         sampling.adaptive_weight_value_eps=1e-6 \
         sampling.adaptive_weight_clip_ratio=10 \
         sampling.n_clusters_2d_end=$n_finish \
@@ -69,8 +95,6 @@ for time_frame in 100; do
         data.data_path=$data_path \
         data.data_type=other \
         data.single_time_frame=${time_frame}
-      done
-  done
 done
 done
 # lr=5e-4 # 5.6e-5 non full 

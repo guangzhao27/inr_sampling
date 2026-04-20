@@ -68,3 +68,9 @@ current setting:
 value: loss_std*area
 each cell count: propotional to value
 each sample weight: area/value/average_sample_num (the real sample number is not same as expected sample number)
+
+# command show the gradient error variance
+python script/inr_sample/compare_four_runs_gradient_trend.py \
+  --checkpoint-parent Results/checkpoints \
+  --output-dir Results/gradient_trend_comparison_four_runs_quick \
+  --n-repeats 2

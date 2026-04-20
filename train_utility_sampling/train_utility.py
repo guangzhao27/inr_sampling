@@ -390,9 +390,32 @@ def _save_validation_sampling_dynamics(step: int, graph: Data, inr, sampler, cfg
     loss_image = np.zeros((h, w), dtype=np.float32)
     loss_image[coords[:, 0].numpy(), coords[:, 1].numpy()] = losses
 
+    gt_image = np.zeros((h, w), dtype=np.float32)
+    pred_image = np.zeros((h, w), dtype=np.float32)
+    gt_values = graph.feat.detach().cpu().flatten().numpy().astype(np.float32)
+    pred_values = pred.detach().cpu().flatten().numpy().astype(np.float32)
+    gt_image[coords[:, 0].numpy(), coords[:, 1].numpy()] = gt_values
+    pred_image[coords[:, 0].numpy(), coords[:, 1].numpy()] = pred_values
+
     save_root = Path(getattr(sampler, "save_samples_path", "./sampled_frames"))
     save_dir = save_root / f"validation_i{step}"
     save_dir.mkdir(parents=True, exist_ok=True)
+
+    # Save reconstruction-ready tensors so images can be regenerated in Python.
+    np.savez_compressed(
+        save_dir / "reconstruction_data.npz",
+        step=np.int64(step),
+        height=np.int64(h),
+        width=np.int64(w),
+        coords=coords.numpy().astype(np.int64),
+        sampled_coords=sampled_coords.astype(np.int64),
+        gt_values=gt_values,
+        pred_values=pred_values,
+        gt_image=gt_image,
+        pred_image=pred_image,
+        loss_values=losses.astype(np.float32),
+        loss_image=loss_image,
+    )
 
     # Keep color scaling consistent across all saved loss images.
     vmin = float(loss_image.min())

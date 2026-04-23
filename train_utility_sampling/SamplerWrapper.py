@@ -683,6 +683,7 @@ class INRSingle2dAdaptiveSamplerWrapper(InrSamplerWrapper):
         equal_cell_topk: bool = False,
         equal_cell_topk_count_mode: str = "same",
         equal_cell_topk_weight_mode: str = "none",
+        equal_cell_topk_area_weight_coefficient: float = 1.0,
         grid_update_interval: int = 100,
         adaptive_iterations: int = 8,
         save_samples_path: Path = Path("logs/sampling"),
@@ -725,6 +726,7 @@ class INRSingle2dAdaptiveSamplerWrapper(InrSamplerWrapper):
                 f"'{equal_cell_topk_weight_mode}'. Expected one of {sorted(valid_equal_topk_weight_modes)}"
             )
         self.equal_cell_topk_weight_mode = equal_cell_topk_weight_mode
+        self.equal_cell_topk_area_weight_coefficient = float(equal_cell_topk_area_weight_coefficient)
 
         self.grid_update_interval = max(1, int(grid_update_interval))
         self.adaptive_iterations = max(1, int(adaptive_iterations))
@@ -941,7 +943,8 @@ class INRSingle2dAdaptiveSamplerWrapper(InrSamplerWrapper):
             if self.equal_cell_topk_weight_mode == "area_over_count":
                 counts_f = counts.to(torch.float32).clamp_min(1.0)
                 cell_area_f = cell_area.to(torch.float32).clamp_min(1.0)
-                per_cell_weight = cell_area_f / counts_f
+                weight_coefficient = self.equal_cell_topk_area_weight_coefficient
+                per_cell_weight = cell_area_f**weight_coefficient / counts_f
                 per_cell_weight = self._normalize_and_clip_cell_weights(per_cell_weight)
                 selected_cell_ids = cell_ids[topk_local]
                 sampled_data_kwargs["weight"] = per_cell_weight[selected_cell_ids]
@@ -1570,6 +1573,9 @@ def create_inr_sampler(cfg, inr, graph, current_date_str, run_name, device='cuda
             equal_cell_topk=cfg.sampling.get("adaptive_equal_cell_topk", False),
             equal_cell_topk_count_mode=cfg.sampling.get("adaptive_equal_cell_topk_count_mode", "same"),
             equal_cell_topk_weight_mode=cfg.sampling.get("adaptive_equal_cell_topk_weight_mode", "none"),
+            equal_cell_topk_area_weight_coefficient=cfg.sampling.get(
+                "adaptive_equal_cell_topk_area_weight_coefficient", 1.0
+            ),
             grid_update_interval=cfg.sampling.get("adaptive_grid_update_interval", 100),
             adaptive_iterations=cfg.sampling.get("adaptive_iterations", 8),
             save_samples_path=save_path,

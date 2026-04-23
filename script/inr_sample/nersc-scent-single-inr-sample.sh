@@ -9,24 +9,31 @@
 
 w0=30
 sampling_rate=2e-3
-sampling_rate=2e-3
 train_ratio=1
 inner_steps=6
-lr=3e-4 # 5.6e-5 non full 
+lr=1e-4 # 5.6e-5 non full 
 depth=6
 n_start=11
 n_finish=128
 re=10000
+optimizer_name=sgd
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 cd "$REPO_ROOT"
 
 HOST=$(hostname -f)
+is_bnl=false
 if [[ $HOST == *"bnl"* ]]; then
+  is_bnl=true
   source ~/.bashrc
   conda activate /sdcc/u/gzhao/scratch/conda/inr_sampling
   wandb offline
+  wandb_base_dir="${WANDB_DIR:-${REPO_ROOT}/coral/wandb}"
+  wandb_run_dir="$wandb_base_dir/wandb"
+  offline_log_file="$wandb_base_dir/offline_run_paths.txt"
+  mkdir -p "$wandb_run_dir"
+  touch "$offline_log_file"
   data_path="/sdcc/u/gzhao/scratch/inr_sampling/data/NS2d/ns_data_res2048_re${re}_7.npy"
 else
   source ~/anaconda3/etc/profile.d/conda.sh
@@ -74,7 +81,11 @@ for time_frame in 100; do
       continue
     fi
 
-    run_name="NS1024_single_${case_name}_re_${re}_sampling_${sampling_rate}_lr_${lr}_depth_${depth}_t${time_frame}"
+    run_name="NS1024_single_${case_name}_re_${re}_sampling_${sampling_rate}_lr_${lr}_depth_${depth}_t${time_frame}_optim_${optimizer_name}"
+
+    if [[ "$is_bnl" == "true" ]]; then
+      before_runs="$(find "$wandb_run_dir" -maxdepth 1 -type d -name 'offline-run-*' -printf '%f\n' | sort)"
+    fi
 
     python inr_sample/single_image_inr.py \
         data.dataset_name=NS \
@@ -113,6 +124,19 @@ for time_frame in 100; do
         data.data_path=$data_path \
         data.data_type=other \
         data.single_time_frame=${time_frame}
+
+    if [[ "$is_bnl" == "true" ]]; then
+      after_runs="$(find "$wandb_run_dir" -maxdepth 1 -type d -name 'offline-run-*' -printf '%f\n' | sort)"
+      new_runs="$(comm -13 <(printf "%s\n" "$before_runs") <(printf "%s\n" "$after_runs") || true)"
+      if [[ -n "$new_runs" ]]; then
+        while IFS= read -r run_dir_name; do
+          [[ -z "$run_dir_name" ]] && continue
+          printf "%s\t%s\t%s\n" "$(date '+%Y-%m-%d %H:%M:%S')" "$run_name" "$wandb_run_dir/$run_dir_name" >> "$offline_log_file"
+        done <<< "$new_runs"
+      else
+        printf "%s\t%s\t%s\n" "$(date '+%Y-%m-%d %H:%M:%S')" "$run_name" "OFFLINE_DIR_NOT_FOUND" >> "$offline_log_file"
+      fi
+    fi
 done
 done
 # lr=5e-4 # 5.6e-5 non full 

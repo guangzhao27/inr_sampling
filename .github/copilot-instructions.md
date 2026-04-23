@@ -61,6 +61,9 @@ Whenever you update the code, please also update this instructions file to refle
 - Paper writing source:
   - `Results/latex/INR-Refined-Grid-Sampling-Neurips-Workshop/ICLR_INR_RGS.tex` (main paper LaTeX file)
 
+## W&B Offline Run Tracking (BNL cluster)
+Use this skill when you work on sh file: `.github/skills/wandb-offline-sync/SKILL.md` for the full pattern (before/after snapshot, TSV log, sync-script generation) and reference implementations.
+
 ## Standard Workflows
 
 ### 1) Environment Setup

@@ -18,3 +18,4 @@ __pycache__/
 /checkpoints/*
 /wandb/*
 /sampled_frames/*
+**/.ipynb_checkpoints/**

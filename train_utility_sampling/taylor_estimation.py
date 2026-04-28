@@ -482,6 +482,64 @@ def cell_loss_variance_estimate_with_random_sampling(cell_cor_range, graph, inr,
     return torch.stack(loss_var_list, dim=0)
 
 
+def cell_sqrt_loss_variance_estimate_with_random_sampling(cell_cor_range, graph, inr, device, max_samples_per_cell=16, approx_last_layer=False) -> torch.Tensor:
+    """
+    Estimate per-cell variance of sqrt(loss) by random sampling points inside each cell.
+
+    Identical API to ``cell_loss_variance_estimate_with_random_sampling`` except
+    that the per-point quantity whose variance is computed is ``sqrt(loss)``
+    (i.e. absolute error |pred - target|) rather than the squared loss.
+
+    For each cell [r_start, r_end, c_start, c_end] (inclusive), it samples
+    points uniformly at random inside the cell, evaluates per-point absolute
+    error, and returns the empirical variance per cell.
+
+    Args:
+        cell_cor_range: Tensor [N, 4] with (r_start, r_end, c_start, c_end)
+        graph: Graph object containing spatial embeddings and features
+        inr: INR model
+        device: Computation device
+        max_samples_per_cell: Maximum number of random samples per cell (default: 16)
+        approx_last_layer: Kept for API compatibility; not used here.
+
+    Returns:
+        Tensor [N] containing empirical variance of sqrt(loss) per cell.
+    """
+    del approx_last_layer  # Intentionally unused; kept for signature compatibility.
+
+    graph = graph.cpu()
+    H = graph.cor.max().item() + 1
+    features = graph.feat.view(H, H, 1)
+    coords = graph.space_emb.view(H, H, 2)
+
+    inr.to(device)
+
+    sqrt_loss_var_list = []
+
+    for cell in cell_cor_range:
+        r_start, r_end, c_start, c_end = [int(v) for v in cell.tolist()]
+
+        h = r_end - r_start + 1
+        w = c_end - c_start + 1
+        n_samples = min(max_samples_per_cell, h * w)
+
+        rr = torch.randint(r_start, r_end + 1, (n_samples,))
+        cc = torch.randint(c_start, c_end + 1, (n_samples,))
+
+        sample_coords = coords[rr, cc].to(device)
+        sample_targets = features[rr, cc].to(device)
+
+        with torch.no_grad():
+            sample_recon = inr(sample_coords)
+        sample_losses = loss_function(sample_recon, sample_targets).reshape(-1)
+        sqrt_losses = sample_losses.sqrt()
+
+        # Use population variance to avoid NaN when n_samples==1.
+        sqrt_loss_var_list.append(sqrt_losses.var(unbiased=False))
+
+    return torch.stack(sqrt_loss_var_list, dim=0)
+
+
 def cell_grad_variance_estimate_with_norm_corrected(cell_cor_range:torch.Tensor, graph, inr, device, probes=500)-> torch.Tensor:
     """
     Partially batched gradient estimation.

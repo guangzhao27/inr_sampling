@@ -60,6 +60,11 @@ Whenever you update the code, please also update this instructions file to refle
   - `Results/generate_performance_figures.py` (builds `trainepoch.pdf`, `traintime.pdf`, `trainrel_loss.pdf` from W&B runs)
 - Paper writing source:
   - `Results/latex/INR-Refined-Grid-Sampling-Neurips-Workshop/ICLR_INR_RGS.tex` (main paper LaTeX file)
+  - `Results/latex/NIPS-2026-INR-Sampling/neurips_2026.tex` (NeurIPS 2026 main LaTeX source)
+  - Third-experiment insertion point for gradient-alignment figure/caption/discussion:
+    `\section{Experiments}` -> `\subsection{Ablation Study}` -> `\subsubsection{The weight function effect}`
+  - Figure asset used by the third experiment:
+    `Results/latex/NIPS-2026-INR-Sampling/figure/sampler_gradient_alignment_metric.pdf`
 
 ## W&B Offline Run Tracking (BNL cluster)
 Use this skill when you work on sh file: `.github/skills/wandb-offline-sync/SKILL.md` for the full pattern (before/after snapshot, TSV log, sync-script generation) and reference implementations.

@@ -18,6 +18,7 @@ from components.transform import Transform
 from utils.quadtree import HierarchicalImageGrid, ImageCell
 from train_utility_sampling.taylor_estimation import (
     cell_loss_variance_estimate_with_random_sampling,
+    cell_sqrt_loss_variance_estimate_with_random_sampling,
     grad_variance_ground_truth,
     cell_grad_variance_estimate_with_norm_corrected,
     cell_grad_variance_estimate_with_jacrev,
@@ -683,7 +684,7 @@ class INRSingle2dAdaptiveSamplerWrapper(InrSamplerWrapper):
         equal_cell_topk: bool = False,
         equal_cell_topk_count_mode: str = "same",
         equal_cell_topk_weight_mode: str = "none",
-        equal_cell_topk_area_weight_coefficient: float = 1.0,
+        power_for_loss_as_weight: float = 0.2,
         grid_update_interval: int = 100,
         adaptive_iterations: int = 8,
         save_samples_path: Path = Path("logs/sampling"),
@@ -719,14 +720,14 @@ class INRSingle2dAdaptiveSamplerWrapper(InrSamplerWrapper):
             )
         self.equal_cell_topk_count_mode = equal_cell_topk_count_mode
 
-        valid_equal_topk_weight_modes = {"none", "area_over_count"}
+        valid_equal_topk_weight_modes = {"none", "area_over_count", "loss_sqrt"}
         if equal_cell_topk_weight_mode not in valid_equal_topk_weight_modes:
             raise ValueError(
                 "Unknown equal_cell_topk_weight_mode "
                 f"'{equal_cell_topk_weight_mode}'. Expected one of {sorted(valid_equal_topk_weight_modes)}"
             )
         self.equal_cell_topk_weight_mode = equal_cell_topk_weight_mode
-        self.equal_cell_topk_area_weight_coefficient = float(equal_cell_topk_area_weight_coefficient)
+        self.power_for_loss_as_weight = float(power_for_loss_as_weight)
 
         self.grid_update_interval = max(1, int(grid_update_interval))
         self.adaptive_iterations = max(1, int(adaptive_iterations))
@@ -857,6 +858,14 @@ class INRSingle2dAdaptiveSamplerWrapper(InrSamplerWrapper):
 
                 cell_value = loss_variance * cell_areas_tensor
                 return cell_value.tolist()
+            
+            if mode == "loss_sqrt_std":
+                loss_sqrt_variance = cell_sqrt_loss_variance_estimate_with_random_sampling(
+                    cell_coords_tensor, graph, self.model, self.device
+                )
+
+                cell_value = loss_sqrt_variance * cell_areas_tensor
+                return cell_value.tolist() 
 
             raise ValueError(f"Unknown adaptive evaluation mode: {mode}")
         
@@ -943,21 +952,27 @@ class INRSingle2dAdaptiveSamplerWrapper(InrSamplerWrapper):
             if self.equal_cell_topk_weight_mode == "area_over_count":
                 counts_f = counts.to(torch.float32).clamp_min(1.0)
                 cell_area_f = cell_area.to(torch.float32).clamp_min(1.0)
-                weight_coefficient = self.equal_cell_topk_area_weight_coefficient
-                per_cell_weight = cell_area_f**weight_coefficient / counts_f
+                per_cell_weight = cell_area_f / counts_f
                 per_cell_weight = self._normalize_and_clip_cell_weights(per_cell_weight)
                 selected_cell_ids = cell_ids[topk_local]
                 sampled_data_kwargs["weight"] = per_cell_weight[selected_cell_ids]
-            
-            # randomly show some samples weight, loss value, cell area, cell count for debugging
-            if False:
-                num_debug_samples = min(5, len(selected_idx))
-                debug_indices = torch.randperm(len(selected_idx))[:num_debug_samples]
-                for i in debug_indices:
-                    print(f"Sample {i}: weight={sampled_data_kwargs['weight'][i].item()}, "
-                          f"loss={sampled_dif[topk_local[i]].item()}, "
-                          f"cell_area={cell_area[selected_cell_ids[i]].item()}, "
-                          f"cell_count={counts[selected_cell_ids[i]].item()}")
+            elif self.equal_cell_topk_weight_mode == "loss_sqrt":
+                # Per-cell weight is sqrt(mean sampled loss within each cell).
+                per_point_loss = (feats - preds).pow(2).sum(dim=1)
+                per_cell_loss_sum = torch.zeros(n_cells, device=self.device, dtype=torch.float32)
+                per_cell_loss_sum.index_add_(0, cell_ids, per_point_loss.to(torch.float32))
+                counts_f = counts.to(torch.float32).clamp_min(1.0)
+                per_cell_mean_loss = per_cell_loss_sum / counts_f
+                counts_f = counts.to(torch.float32).clamp_min(1.0)
+                cell_area_f = cell_area.to(torch.float32).clamp_min(1.0)
+                per_cell_weight = (
+                    torch.pow(per_cell_mean_loss.clamp_min(0.0), self.power_for_loss_as_weight)
+                    * cell_area_f
+                    / counts_f
+                )
+                per_cell_weight = self._normalize_and_clip_cell_weights(per_cell_weight)
+                selected_cell_ids = cell_ids[topk_local]
+                sampled_data_kwargs["weight"] = per_cell_weight[selected_cell_ids]
 
             sampled_graph = Data(**sampled_data_kwargs)
             return sampled_graph.to(self.device)
@@ -980,12 +995,15 @@ class INRSingle2dAdaptiveSamplerWrapper(InrSamplerWrapper):
                 values_safe = values_f.clamp_min(self.weight_value_eps)
                 per_cell_weight = cell_area_f / values_safe
             elif self.weight_mode == "area_over_count":
-                counts_safe = counts_f.clamp_min(1.0)
-                per_cell_weight = counts_safe / cell_area_f.clamp_min(1.0)
+                counts_f = counts.to(torch.float32).clamp_min(1.0)
+                cell_area_f = cell_area.to(torch.float32).clamp_min(1.0)
+                per_cell_weight = cell_area_f / counts_f
+                # counts_safe = counts_f.clamp_min(1.0)
+                # per_cell_weight = counts_safe / cell_area_f.clamp_min(1.0)
             else:
                 raise ValueError(f"Unsupported weight_mode: {self.weight_mode}")
             per_cell_weight = self._normalize_and_clip_cell_weights(per_cell_weight)
-            sampled_weights = per_cell_weight[cell_ids]         # (total_samples,)
+            sampled_weights = per_cell_weight[cell_ids]         # (total_samples)
         sampled_graph = Data(
             cor=graph_on_device.cor[sampled_idx],
             time=graph_on_device.time[sampled_idx],
@@ -993,12 +1011,6 @@ class INRSingle2dAdaptiveSamplerWrapper(InrSamplerWrapper):
             space_emb=graph_on_device.space_emb[sampled_idx],
             weight=sampled_weights,
         )
-        
-        # if save_image:
-        #     self.save_image_path = os.path.join(
-        #         self.save_samples_path, f"adaptive_i{inner_step}"
-        #     )
-        #     self._save_sample_images(graph, sampled_graph)
         
         return sampled_graph.to(self.device)
 
@@ -1573,9 +1585,7 @@ def create_inr_sampler(cfg, inr, graph, current_date_str, run_name, device='cuda
             equal_cell_topk=cfg.sampling.get("adaptive_equal_cell_topk", False),
             equal_cell_topk_count_mode=cfg.sampling.get("adaptive_equal_cell_topk_count_mode", "same"),
             equal_cell_topk_weight_mode=cfg.sampling.get("adaptive_equal_cell_topk_weight_mode", "none"),
-            equal_cell_topk_area_weight_coefficient=cfg.sampling.get(
-                "adaptive_equal_cell_topk_area_weight_coefficient", 1.0
-            ),
+            power_for_loss_as_weight=cfg.sampling.get("power_for_loss_as_weight", 0.2),
             grid_update_interval=cfg.sampling.get("adaptive_grid_update_interval", 100),
             adaptive_iterations=cfg.sampling.get("adaptive_iterations", 8),
             save_samples_path=save_path,

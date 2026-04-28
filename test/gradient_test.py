@@ -36,6 +36,7 @@ from typing import Dict, List, Optional, Union
 import numpy as np
 import torch
 from torch_geometric.data import Data
+from omegaconf import DictConfig, open_dict
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -88,8 +89,15 @@ def _apply_sampler_overrides(cfg, overrides: Optional[Dict]) -> object:
     """Return a deep-copied cfg with sampling fields replaced by *overrides*."""
     cfg_eval = copy.deepcopy(cfg)
     if overrides:
-        for key, value in overrides.items():
-            setattr(cfg_eval.sampling, key, value)
+        sampling_cfg = cfg_eval.sampling
+        if isinstance(sampling_cfg, DictConfig):
+            # Checkpoints can carry structured configs from older runs; allow adding new keys.
+            with open_dict(sampling_cfg):
+                for key, value in overrides.items():
+                    sampling_cfg[key] = value
+        else:
+            for key, value in overrides.items():
+                setattr(sampling_cfg, key, value)
     return cfg_eval
 
 

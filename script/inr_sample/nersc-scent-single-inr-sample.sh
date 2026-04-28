@@ -12,14 +12,15 @@ sampling_rate=2e-3
 train_ratio=1
 inner_steps=6
 lr=1e-4 # 5.6e-5 non full 
+lr=1e-4 # 5.6e-5 non full 
 depth=6
 n_start=11
 n_finish=128
 re=10000
-optimizer_name=sgd
+optimizer_name=adamw
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-
+adaptive_mode="loss"
 cd "$REPO_ROOT"
 
 HOST=$(hostname -f)
@@ -54,28 +55,57 @@ for time_frame in 100; do
     random \
     grid_linear \
     adaptive_topk_none \
-    adaptive_topk_area_over_count; do
+    adaptive_loss_sqrt_std \
+    adaptive_best \
+    adaptive_unbiased; do
 
-    if [[ "$case_name" == "random" ]]; then
-      sample_type="random"
-      adaptive_equal_cell_topk="False"
-      adaptive_weight_mode="none"
-      adaptive_equal_cell_topk_weight_mode="none"
-    elif [[ "$case_name" == "grid_linear" ]]; then
-      sample_type="2d_grid_linear"
-      adaptive_equal_cell_topk="False"
-      adaptive_weight_mode="none"
-      adaptive_equal_cell_topk_weight_mode="none"
-    elif [[ "$case_name" == "adaptive_topk_none" ]]; then
+    # if [[ "$case_name" == "adaptive_loss_sqrt_std" ]]; then
+    #   sample_type="2d_grid_adaptive"
+    #   adaptive_equal_cell_topk="True"
+    #   adaptive_weight_mode="none"
+    #   adaptive_equal_cell_topk_weight_mode="none"
+    #   adaptive_mode="loss_sqrt_std"
+
+    if [[ "$case_name" == "adaptive_best" ]]; then
       sample_type="2d_grid_adaptive"
+      adaptive_mode="loss_sqrt_std"
+      adaptive_iterations=8
       adaptive_equal_cell_topk="True"
+      adaptive_equal_cell_topk_count_mode="same"
+      adaptive_equal_cell_topk_weight_mode="loss_sqrt"
       adaptive_weight_mode="none"
-      adaptive_equal_cell_topk_weight_mode="none"
-    elif [[ "$case_name" == "adaptive_topk_area_over_count" ]]; then
+      power_for_loss_as_weight=0.25
+
+    elif [[ "$case_name" == "adaptive_unbiased" ]]; then
       sample_type="2d_grid_adaptive"
+      adaptive_mode="loss_sqrt_std"
+      adaptive_iterations=8
       adaptive_equal_cell_topk="True"
-      adaptive_weight_mode="area_over_count"
+      adaptive_equal_cell_topk_count_mode="same"
       adaptive_equal_cell_topk_weight_mode="area_over_count"
+      adaptive_weight_mode="area_over_count"
+      power_for_loss_as_weight=1.0
+
+    # if [[ "$case_name" == "random" ]]; then
+    #   sample_type="random"
+    #   adaptive_equal_cell_topk="False"
+    #   adaptive_weight_mode="none"
+    #   adaptive_equal_cell_topk_weight_mode="none"
+    # elif [[ "$case_name" == "grid_linear" ]]; then
+    #   sample_type="2d_grid_linear"
+    #   adaptive_equal_cell_topk="False"
+    #   adaptive_weight_mode="none"
+    #   adaptive_equal_cell_topk_weight_mode="none"
+    # elif [[ "$case_name" == "adaptive_topk_none" ]]; then
+    #   sample_type="2d_grid_adaptive"
+    #   adaptive_equal_cell_topk="True"
+    #   adaptive_weight_mode="none"
+    #   adaptive_equal_cell_topk_weight_mode="none"
+    # elif [[ "$case_name" == "adaptive_topk_area_over_count" ]]; then
+    #   sample_type="2d_grid_adaptive"
+    #   adaptive_equal_cell_topk="True"
+    #   adaptive_weight_mode="area_over_count"
+    #   adaptive_equal_cell_topk_weight_mode="area_over_count"
     else
       echo "Unknown case: $case_name"
       continue
@@ -95,6 +125,7 @@ for time_frame in 100; do
         optim.optimizer=$optimizer_name \
         optim.sgd_momentum=$sgd_momentum \
         optim.sgd_nesterov=$sgd_nesterov \
+        sampling.adaptive_mode=$adaptive_mode \
         optim.lr_inr=$lr \
         optim.epochs=5000 \
         optim.inner_steps=$inner_steps \
@@ -116,6 +147,9 @@ for time_frame in 100; do
         sampling.adaptive_equal_cell_topk=$adaptive_equal_cell_topk \
         sampling.adaptive_weight_mode=$adaptive_weight_mode \
         sampling.adaptive_equal_cell_topk_weight_mode=$adaptive_equal_cell_topk_weight_mode \
+        sampling.adaptive_equal_cell_topk_count_mode=$adaptive_equal_cell_topk_count_mode \
+        sampling.adaptive_iterations=$adaptive_iterations \
+        sampling.power_for_loss_as_weight=$power_for_loss_as_weight \
         sampling.adaptive_weight_value_eps=1e-6 \
         sampling.adaptive_weight_clip_ratio=10 \
         sampling.n_clusters_2d_end=$n_finish \

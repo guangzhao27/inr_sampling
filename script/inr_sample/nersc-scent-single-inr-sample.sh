@@ -49,24 +49,41 @@ sgd_nesterov=True
 # # for time_frame in 100 120 140 160 180 200; do
 # #   for sample_type in NMT random 2d_grid_linear EVOS; do
 # model_type choices: siren single_image_fourier_mlp
-for time_frame in 100; do
+for time_frame in 100 120 140 160 180 200; do
   for case_name in \
     full \
     random \
-    grid_linear \
-    adaptive_topk_none \
-    adaptive_loss_sqrt_std \
-    \ #adaptive_best \
-    adaptive_unbiased; do
+    NMT \
+    EVOS \
+    adaptive_loss_sqrt_std; do
 
-    # if [[ "$case_name" == "adaptive_loss_sqrt_std" ]]; then
-    #   sample_type="2d_grid_adaptive"
-    #   adaptive_equal_cell_topk="True"
-    #   adaptive_weight_mode="none"
-    #   adaptive_equal_cell_topk_weight_mode="none"
-    #   adaptive_mode="loss_sqrt_std"
+    lr=1e-4
+    epochs=5000
+    if [[ "$case_name" == "full" ]]; then
+      sample_type="null"
+      lr=5e-4 
+      epochs=2500
 
-    if [[ "$case_name" == "adaptive_best" ]]; then
+    elif [[ "$case_name" == "random" ]]; then
+      sample_type="random"
+      epochs=10000
+
+    elif [[ "$case_name" == "NMT" ]]; then
+      sample_type="NMT"
+
+    elif [[ "$case_name" == "EVOS" ]]; then
+      sample_type="EVOS"
+
+    elif [[ "$case_name" == "adaptive_loss_sqrt_std" ]]; then
+      sample_type="2d_grid_adaptive"
+      adaptive_equal_cell_topk="True"
+      adaptive_weight_mode="none"
+      adaptive_iterations=8
+      adaptive_equal_cell_topk_count_mode="same"
+      adaptive_equal_cell_topk_weight_mode="none"
+      adaptive_mode="loss_sqrt_std"
+
+    elif [[ "$case_name" == "adaptive_best" ]]; then
       sample_type="2d_grid_adaptive"
       adaptive_mode="loss_sqrt_std"
       adaptive_iterations=8
@@ -128,7 +145,7 @@ for time_frame in 100; do
         optim.sgd_nesterov=$sgd_nesterov \
         sampling.adaptive_mode=$adaptive_mode \
         optim.lr_inr=$lr \
-        optim.epochs=5000 \
+        optim.epochs=$epochs \
         optim.inner_steps=$inner_steps \
         optim.evo_every_epochs=100 \
         inr.latent_dim=256 \
@@ -137,7 +154,7 @@ for time_frame in 100; do
         saved_checkpoint=False \
         wandb.name=$run_name \
         wandb.use_wandb=True \
-        wandb.project=workshop-inr-sampling-revise  \
+        wandb.project=nips-inr-sampling  \
         inr.w0=$w0 \
         sampling.rate=$sampling_rate \
         sampling.type=$sample_type \

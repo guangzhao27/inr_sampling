@@ -19,3 +19,5 @@ __pycache__/
 /wandb/*
 /sampled_frames/*
 **/.ipynb_checkpoints/**
+CLAUDE.md
+/test/*

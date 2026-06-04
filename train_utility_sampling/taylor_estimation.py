@@ -540,6 +540,81 @@ def cell_sqrt_loss_variance_estimate_with_random_sampling(cell_cor_range, graph,
     return torch.stack(sqrt_loss_var_list, dim=0)
 
 
+def cell_grad_variance_estimate_with_random_sampling(
+    cell_cor_range,
+    graph,
+    inr,
+    device,
+    max_samples_per_cell=16,
+    approx_last_layer=False,
+) -> torch.Tensor:
+    """
+    Estimate per-cell gradient variance by random sampling points inside each cell.
+
+    For each sampled point inside a cell, this computes the parameter gradient of
+    the pointwise squared loss, forms the mean gradient within the cell, and then
+    returns the average squared L2 distance to that mean:
+
+        E[||g_i - mean(g)||_2^2]
+
+    where each ``g_i`` is the gradient of one sampled point in the cell.
+
+    Args:
+        cell_cor_range: Tensor [N, 4] with (r_start, r_end, c_start, c_end)
+        graph: Graph object containing spatial embeddings and features
+        inr: INR model
+        device: Computation device
+        max_samples_per_cell: Maximum number of random samples per cell
+        approx_last_layer: If True, only use the last layer parameters
+
+    Returns:
+        Tensor [N] containing empirical gradient variance per cell.
+    """
+    graph = graph.cpu()
+    H = graph.cor.max().item() + 1
+    features = graph.feat.view(H, H, 1)
+    coords = graph.space_emb.view(H, H, 2)
+
+    inr.to(device)
+    params = list(inr.last_layer.parameters()) if approx_last_layer else list(inr.parameters())
+
+    grad_var_list = []
+
+    for cell in cell_cor_range:
+        r_start, r_end, c_start, c_end = [int(v) for v in cell.tolist()]
+
+        h = r_end - r_start + 1
+        w = c_end - c_start + 1
+        n_samples = min(max_samples_per_cell, h * w)
+
+        rr = torch.randint(r_start, r_end + 1, (n_samples,))
+        cc = torch.randint(c_start, c_end + 1, (n_samples,))
+
+        sample_coords = coords[rr, cc].to(device)
+        sample_targets = features[rr, cc].to(device)
+
+        point_grads = []
+        for coord, target in zip(sample_coords, sample_targets):
+            pred = inr(coord.unsqueeze(0))
+            point_loss = loss_function(pred, target.unsqueeze(0)).mean()
+            grads = torch.autograd.grad(
+                point_loss,
+                params,
+                retain_graph=False,
+                create_graph=False,
+                allow_unused=True,
+            )
+            grad_vec = torch.cat([g.reshape(-1) for g in grads if g is not None]).detach()
+            point_grads.append(grad_vec)
+
+        G = torch.stack(point_grads, dim=0)
+        G_mean = G.mean(dim=0, keepdim=True)
+        grad_var = ((G - G_mean) ** 2).sum(dim=1).mean()
+        grad_var_list.append(grad_var)
+
+    return torch.stack(grad_var_list, dim=0)
+
+
 def cell_grad_variance_estimate_with_norm_corrected(cell_cor_range:torch.Tensor, graph, inr, device, probes=500)-> torch.Tensor:
     """
     Partially batched gradient estimation.

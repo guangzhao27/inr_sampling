@@ -12,7 +12,6 @@ sampling_rate=2e-3
 train_ratio=1
 inner_steps=6
 lr=1e-4 # 5.6e-5 non full 
-lr=1e-4 # 5.6e-5 non full 
 depth=6
 n_start=11
 n_finish=128
@@ -52,11 +51,12 @@ sgd_nesterov=True
 # model_type choices: siren single_image_fourier_mlp
 for time_frame in 100; do
   for case_name in \
+    full \
     random \
     grid_linear \
     adaptive_topk_none \
     adaptive_loss_sqrt_std \
-    adaptive_best \
+    \ #adaptive_best \
     adaptive_unbiased; do
 
     # if [[ "$case_name" == "adaptive_loss_sqrt_std" ]]; then
@@ -75,7 +75,8 @@ for time_frame in 100; do
       adaptive_equal_cell_topk_weight_mode="loss_sqrt"
       adaptive_weight_mode="none"
       power_for_loss_as_weight=0.25
-
+    if [[ "$case_name" == "full" ]]; then
+      sample_type=null
     elif [[ "$case_name" == "adaptive_unbiased" ]]; then
       sample_type="2d_grid_adaptive"
       adaptive_mode="loss_sqrt_std"

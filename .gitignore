@@ -21,3 +21,5 @@ __pycache__/
 **/.ipynb_checkpoints/**
 CLAUDE.md
 /test/*
+/to-share/*
+.github/copilot-instructions.md

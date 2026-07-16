@@ -4,7 +4,6 @@ components/lmc/__pycache__/*
 util/__pycache__/*
 */__pycache__/*
 utils/data/__pycache__/*
-*.ipynb
 *.pyc
 __pycache__/
 *.png

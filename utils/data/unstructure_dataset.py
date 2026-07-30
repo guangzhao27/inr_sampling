@@ -1,28 +1,16 @@
-import os
-import math
 import glob
-import h5py
-import torch
-import random
-import scipy.io
-import numpy as np
-import xarray as xr
-from itertools import product
-from einops import rearrange
-from argparse import ArgumentParser
-from functools import partial
-# import apebench
-
-# from torch.utils.data import Dataset, DataLoader
-
-import torch.nn as nn
-
-from torch_geometric.data import Dataset, Data
-from torch_geometric.loader import DataLoader
-from torch_geometric.data import Batch
-from mmap_ninja import RaggedMmap
-from time import time
+import math
+import os
 from collections import defaultdict
+
+import h5py
+import numpy as np
+import torch
+
+# import apebench
+# from torch.utils.data import Dataset, DataLoader
+from mmap_ninja import RaggedMmap
+from torch_geometric.data import Batch, Data, Dataset
 
 # def creat_dataset(train_num, val_num, test_num, train_p_list, val_p_list, test_p_list)
 
@@ -56,7 +44,7 @@ def my_generator(directory):
     """
     # List and sort the .npy files
     files = [f for f in os.listdir(directory) if f.endswith('.npy')]
-    
+
     for file_name in files:
         file_path = os.path.join(directory, file_name)
         print(f"Loading: {file_path}")  # Optional logging
@@ -71,18 +59,18 @@ class GraphNavierStokes(Dataset):
     # latent_vector: encoded latent vector, initally zero and will be updated
     # space_emb: spatical embedding of graph.cor
     # all other dataset should also includes all these properties to run inr.py and train.py
-    
+
     def __init__(
-            self, 
-            ssub=1, 
-            datapath='/pscratch/sd/g/gzhao27/INR/data/ns_V1e-3_N5000_T50.mat', 
-            latent_dim=128, 
-            split='train', 
+            self,
+            ssub=1,
+            datapath='/pscratch/sd/g/gzhao27/INR/data/ns_V1e-3_N5000_T50.mat',
+            latent_dim=128,
+            split='train',
             datanum = 1000,
-            trainnum = 1000, 
+            trainnum = 1000,
             missing_rate=0,
             ):
-        
+
         super().__init__()
 
         self.path = datapath
@@ -90,11 +78,11 @@ class GraphNavierStokes(Dataset):
         self.missing_rate = missing_rate
         self.latent_dim = latent_dim
         self.ssub = ssub
-        
+
         # Dataloading
         datashape = h5py.File(datapath)['u'].shape
         if split == 'train':
-            
+
             data = h5py.File(datapath)['u'][..., ::ssub, ::ssub,  :datanum]
         elif split == 'val':
             data = h5py.File(datapath)['u'][..., ::ssub, ::ssub, trainnum:trainnum+datanum]  #data shape (50, 64, 64, 100)
@@ -107,7 +95,7 @@ class GraphNavierStokes(Dataset):
         self.dataset, self.mask = self.noisy_data_processing(tensor)
         # print("mask->\n",str(self.mask))
         # print("mask->\n",str(len(self.mask)))
-        
+
     def noisy_data_processing(self, tensor):
         if self.missing_rate>0:
             mask = torch.rand(tensor.shape) > self.missing_rate
@@ -159,32 +147,32 @@ class GraphNavierStokes(Dataset):
 
     def len(self):
         return len(self.dataset)
-    
+
     def __getitem__(self, key):
         graph = self.dataset[f"{key}"]
-        
+
         return graph
-    
-    
-    
+
+
+
 def collate_graph_inr(data_list):
     data_list_new = []
     all_cluster_sets = []
-    
+
     time_bias = 0 # the bias used to differentiate different batch of time, so time can act as index
     for i, data in enumerate(data_list):
         datatmp = data.clone()
         datatmp.time = data.time + time_bias
         time_bias += data.T
         data_list_new.append(datatmp)
-        
+
         if hasattr(data, 'cluster_set') and data.cluster_set is not None:
             cluster_set = data.cluster_set
         else:
             # no clusters: create placeholders
             cluster_set = [defaultdict(dict)]
         all_cluster_sets.extend(cluster_set)
-        
+
     batched = Batch.from_data_list(data_list_new)
 
     # 4) Attach the stitched‐together cluster list
@@ -194,30 +182,30 @@ def collate_graph_inr(data_list):
 
 class GraphNavierStokesSampling(GraphNavierStokes):
     def __init__(
-            self, 
-            raw, 
+            self,
+            raw,
             # datapath,
-            # splits, 
-            ssub=1, 
+            # splits,
+            ssub=1,
             missing_rate = 0,
             # use_mmap = True
         ):
-        
+
         super(GraphNavierStokes, self).__init__()
-        
+
         # self.path = datapath
         # self.splits = splits
         self.missing_rate = missing_rate
         self.ssub = ssub
-        
-        
+
+
         # if use_mmap:
         #     images_mmap = RaggedMmap(datapath)
         #     raw = images_mmap[2] # (50, 64, 64, 5000)
         # else:
         #     with h5py.File(datapath, 'r') as f:
         #         raw = f['u']
-        
+
         # TODO: Implement data selector using cfg
         data = raw[..., ::ssub, ::ssub, :]  # (T, H', W', N)
 
@@ -232,7 +220,7 @@ class GraphNavierStokesSampling(GraphNavierStokes):
         self.height = tensor.size(1)
         self.width = tensor.size(2)
         self.T = tensor.size(3)
-        
+
         # Precompute the spatial grid for fast lookup.
         x_coords, y_coords = torch.meshgrid(
             torch.arange(self.height, dtype=torch.float32),
@@ -245,7 +233,7 @@ class GraphNavierStokesSampling(GraphNavierStokes):
 
         self.dataset, self.mask = self.noisy_data_processing(tensor)
 
-    
+
     def noisy_data_processing(self, tensor):
         """
         Vectorized processing for a tensor of shape (N, H, W, T):
@@ -301,14 +289,14 @@ class GraphNavierStokesSampling(GraphNavierStokes):
             dataset[f"{idx}"] = datapoint
 
         return dataset, mask
-    
+
     def initial_latent_vector(self, latent_dim):
         for key, datapoint in self.dataset.items():
             T = datapoint.T
             latent_vector = torch.zeros(T, latent_dim).float()
             datapoint.latent_vector = latent_vector
-    
-        
+
+
 def create_ns_dataset(datapath, latent_dim=256, space_factor=1, split_ratios=(0.5, 0.25, 0.25), seed=42, data_type='mmap', single_image=False):
     """
     Randomly split indices into train/val/test based on given ratios.
@@ -322,7 +310,7 @@ def create_ns_dataset(datapath, latent_dim=256, space_factor=1, split_ratios=(0.
     
     npy datapah: 
     """
-    
+
     # transform to raw, raw is numpy array with shape (T = 50, 64, 64, N = 5000)
     if data_type == 'mmap':
         images_mmap = RaggedMmap(datapath)
@@ -342,13 +330,13 @@ def create_ns_dataset(datapath, latent_dim=256, space_factor=1, split_ratios=(0.
             total_samples = raw.shape[0]
             raw = np.squeeze(raw, axis=-1)
             raw = np.transpose(raw, (1, 2, 3, 0))
-            
+
         #     total_samples = f['particles'].shape[-1]    # original was u
         #     raw = f['particles']    # original was u
             # print("Particles shape: " + str(f['particles'].shape[-1]))
             # print("Particles raw: " + str(f['particles']))
         # f = h5py.File(datapath, 'r')
-        
+
         # print("Compression codec:", str(raw.compression))
         # print("Filter pipeline:", str(raw.compression_opts))
         # print("First two time-slices shape:", str(raw[..., :2].shape))
@@ -361,13 +349,13 @@ def create_ns_dataset(datapath, latent_dim=256, space_factor=1, split_ratios=(0.
         # total_samples = raw.shape[3]
     else:
         raise NotImplementedError()
-    
+
     if single_image:
         chosen_N = 0    # Currently 0-3
         sel_array = raw[..., slice(chosen_N,chosen_N + 1)]
         trainset = GraphNavierStokesSampling(
             raw = sel_array,
-            ssub=space_factor, 
+            ssub=space_factor,
             )
         return trainset
 
@@ -385,13 +373,13 @@ def create_ns_dataset(datapath, latent_dim=256, space_factor=1, split_ratios=(0.
     #     'val': indices[train_end:val_end].tolist(),
     #     'test': indices[val_end:test_end].tolist()
     # }
-    
+
     splits = {
         'train': slice(0, train_end),
         'val': slice(train_end, val_end),
         'test': slice(val_end, test_end)
     }
-    
+
     # Can use sel_array instead of train_array to specify
     # desired image for single image inr
     chosen_N = 3    # Currently 0-3
@@ -399,24 +387,24 @@ def create_ns_dataset(datapath, latent_dim=256, space_factor=1, split_ratios=(0.
     train_array = raw[..., splits['train']]
     val_array = raw[..., splits['val']]
     test_array = raw[..., splits['test']]
-    
-    
+
+
     # raw shape (T, H, W, N)
     trainset = GraphNavierStokesSampling(
         raw = sel_array,
-        ssub=space_factor, 
+        ssub=space_factor,
         )
-    
+
     valset = GraphNavierStokesSampling(
         raw = val_array,
-        ssub=space_factor, 
+        ssub=space_factor,
         )
-    
+
     testset = GraphNavierStokesSampling(
         raw = test_array,
-        ssub=space_factor, 
+        ssub=space_factor,
         )
-    
+
     trainset.initial_latent_vector(latent_dim)
     valset.initial_latent_vector(latent_dim)
     testset.initial_latent_vector(latent_dim)
@@ -430,12 +418,12 @@ def create_ns_dataset(datapath, latent_dim=256, space_factor=1, split_ratios=(0.
 # def create_ks_dataset(datapath, latent_dim, space_factor=1, split_ratios=(0.7, 0.15, 0.15), seed=42):
 #     # datapath = /pscratch/sd/g/gzhao27/INR/data/KuramotoSivashinsky/sample300_time101_space160.npy
 #     raw = np.load(datapath)
-    
-    
+
+
 #     train_end = int(split_ratios[0] * total_samples)
 #     val_end = train_end + int(split_ratios[1] * total_samples)
 #     test_end = train_end+val_end +int(split_ratios[2] * total_samples)
-    
+
 
 def piecewise_fn(
     x: torch.Tensor,
@@ -899,6 +887,368 @@ def create_poolboiling2d_dataset(
         ssub=space_factor,
         missing_rate=0.0,
         sample_idx=sample_idx,
+    )
+
+
+class GraphSpatioTemporalVolume3D(Dataset):
+    """
+    Treat a 2D-spatial + 1D-temporal field as a single 3D (x, y, t) volume.
+
+    Unlike the single-frame 2D flow (which trains one INR per time frame) and
+    unlike SOMA (spatial x,y,z volume with a separate repeated time axis), here
+    the temporal axis IS the third coordinate: the whole (H, W, T) block is one
+    cube whose voxels are (x, y, t) points. This makes the octree-based
+    `3d_grid_adaptive` sampler split the cube into 8 sub-cubes along space AND
+    time jointly.
+
+    Graph contract (single sample, key "0"):
+        cor       : (K, 3) int  -- integer voxel indices (x, y, t), K = H*W*T
+        space_emb : (K, 3)      -- each axis normalised to [-1, 1]
+        feat      : (K, 1)      -- field value at (x, y, t)
+        time      : (K,)        -- all zeros (the whole cube is one "frame";
+                                   set data.single_time_frame=0 downstream so the
+                                   frame-selection step returns the entire cube)
+        T         : scalar 1
+        latent_vector : (1, latent_dim)
+
+    The 3-column `cor` is what auto-routes the pipeline into the 3D sampler
+    (`graph.cor.shape[1] == 3`), with grid_shape = (H, W, T).
+    """
+
+    def __init__(self, volume_hwt, latent_dim=256):
+        super().__init__()
+        if volume_hwt.dim() != 3:
+            raise ValueError(
+                f"Expected a 3D (H, W, T) volume, got shape {tuple(volume_hwt.shape)}"
+            )
+        volume = volume_hwt.float()
+        H, W, T = volume.shape
+        self.height, self.width, self.T_axis = H, W, T
+        self.latent_dim = latent_dim
+
+        xi = torch.arange(H)
+        yi = torch.arange(W)
+        ti = torch.arange(T)
+        X, Y, Tg = torch.meshgrid(xi, yi, ti, indexing="ij")  # each (H, W, T)
+        Xf, Yf, Tf = X.reshape(-1), Y.reshape(-1), Tg.reshape(-1)
+
+        cor = torch.stack([Xf, Yf, Tf], dim=1).long()  # (K, 3)
+
+        def lin(v, n):
+            return 2.0 * v.float() / (n - 1) - 1.0 if n > 1 else torch.zeros_like(v.float())
+
+        space_emb = torch.stack([lin(Xf, H), lin(Yf, W), lin(Tf, T)], dim=1)  # (K, 3)
+        feat = volume.reshape(-1, 1)  # (K, 1), matches meshgrid 'ij' ordering
+        time = torch.zeros(cor.shape[0], dtype=torch.long)
+
+        datapoint = Data(
+            cor=cor,
+            feat=feat,
+            time=time,
+            space_emb=space_emb,
+            T=torch.tensor(1),
+            latent_vector=torch.zeros(1, latent_dim),
+        )
+        self.dataset = {"0": datapoint}
+
+    def __len__(self):
+        return 1
+
+    def __getitem__(self, key):
+        return self.dataset["0"]
+
+
+def create_poolboiling3d_dataset(
+    data_dir,
+    latent_dim=256,
+    space_factor=1,
+    field_key="temperature",
+    condition=100,
+    file_name=None,
+    sample_idx=0,
+    time_start=0,
+    num_frames=64,
+    single_image=True,
+):
+    """
+    Load a PoolBoiling field as a single 3D (x, y, t) volume for octree sampling.
+
+    Reuses the same HDF5 layout as `create_poolboiling2d_dataset` (Twall-*.hdf5,
+    field of shape (T, H, W) or (N, T, H, W)), but instead of picking one time
+    frame it stacks `num_frames` consecutive frames starting at `time_start`
+    into an (H, W, T) cube.
+
+    Args:
+        data_dir: directory with Twall-*.hdf5 files, or a specific file path.
+        space_factor: spatial subsampling stride (applied to H and W).
+        field_key: HDF5 key to read, e.g. "temperature".
+        condition: wall-temperature suffix for default file selection.
+        file_name: optional explicit filename (e.g. "Twall-100.hdf5").
+        sample_idx: sample index when the source tensor is 4D (N, T, H, W).
+        time_start: index of the first temporal frame to include.
+        num_frames: number of consecutive frames to stack along the t axis.
+    """
+    if not single_image:
+        raise NotImplementedError(
+            "create_poolboiling3d_dataset currently supports single_image=True only"
+        )
+
+    if os.path.isfile(data_dir):
+        file_path = data_dir
+    else:
+        if file_name is not None:
+            file_path = os.path.join(data_dir, file_name)
+        else:
+            file_path = os.path.join(data_dir, f"Twall-{condition}.hdf5")
+        if not os.path.exists(file_path):
+            candidates = sorted(glob.glob(os.path.join(data_dir, "Twall-*.hdf5")))
+            if not candidates:
+                raise FileNotFoundError(
+                    f"No PoolBoiling files found in {data_dir}. Expected Twall-*.hdf5"
+                )
+            raise FileNotFoundError(
+                f"Could not find {file_path}. Available files: {[os.path.basename(c) for c in candidates]}"
+            )
+
+    with h5py.File(file_path, "r") as f:
+        if field_key not in f:
+            raise KeyError(
+                f"Missing key '{field_key}' in {file_path}. Available keys: {list(f.keys())}"
+            )
+        raw = f[field_key][:]  # (T, H, W) or (N, T, H, W)
+
+    if raw.ndim == 4:
+        raw = raw[sample_idx]  # (T, H, W)
+    elif raw.ndim != 3:
+        raise ValueError(
+            f"Expected '{field_key}' with 3 or 4 dims, got shape {raw.shape} from {file_path}"
+        )
+
+    T_full = raw.shape[0]
+    t_end = time_start + num_frames
+    if time_start < 0 or t_end > T_full:
+        raise ValueError(
+            f"Requested frames [{time_start}, {t_end}) out of range for T={T_full} "
+            f"in {os.path.basename(file_path)}"
+        )
+
+    raw = raw[time_start:t_end, ::space_factor, ::space_factor]  # (num_frames, H', W')
+    volume = torch.from_numpy(raw.copy()).permute(1, 2, 0).contiguous()  # (H', W', num_frames)
+
+    return GraphSpatioTemporalVolume3D(volume, latent_dim=latent_dim)
+
+
+def create_ns3d_dataset(
+    data_path,
+    latent_dim=256,
+    space_factor=2,
+    sample_idx=0,
+    time_start=0,
+    num_frames=64,
+    single_image=True,
+    normalize=True,
+):
+    """
+    Load a Navier-Stokes .npy sequence as a single 3D (x, y, t) volume.
+
+    NS .npy is shaped (N, T, H, W) (e.g. (1, 250, 1024, 1024) for re=10000).
+    Takes trajectory `sample_idx`, spatially subsamples by `space_factor`
+    (e.g. 2 -> 1024->512), stacks `num_frames` consecutive frames from
+    `time_start` into an (H', W', T) cube for the octree `3d_grid_adaptive`
+    sampler. Reuses GraphSpatioTemporalVolume3D (dataset-agnostic cube builder).
+
+    normalize: min-max the field to [-1, 1]. NS values are O(10) (e.g. vorticity
+        in [-19, 22]), far outside a SIREN's natural [-1, 1] output range, so
+        without this the INR cannot fit the target at all (rel_loss stays ~1.0).
+        rel_loss is scale-invariant, so this does not affect method comparisons.
+    """
+    if not single_image:
+        raise NotImplementedError(
+            "create_ns3d_dataset currently supports single_image=True only"
+        )
+
+    raw = np.load(data_path)  # (N, T, H, W)
+    if raw.ndim != 4:
+        raise ValueError(
+            f"Expected NS .npy with 4 dims (N, T, H, W), got shape {raw.shape} from {data_path}"
+        )
+    if sample_idx < 0 or sample_idx >= raw.shape[0]:
+        raise IndexError(
+            f"sample_idx={sample_idx} out of range for {data_path} with N={raw.shape[0]}"
+        )
+
+    seq = raw[sample_idx]  # (T, H, W)
+    T_full = seq.shape[0]
+    t_end = time_start + num_frames
+    if time_start < 0 or t_end > T_full:
+        raise ValueError(
+            f"Requested frames [{time_start}, {t_end}) out of range for T={T_full} in {data_path}"
+        )
+
+    seq = seq[time_start:t_end, ::space_factor, ::space_factor]  # (num_frames, H', W')
+    volume = torch.from_numpy(seq.copy().astype("float32")).permute(1, 2, 0).contiguous()  # (H', W', T)
+
+    if normalize:
+        vmin = volume.min()
+        vmax = volume.max()
+        if vmax > vmin:
+            volume = 2.0 * (volume - vmin) / (vmax - vmin) - 1.0  # -> [-1, 1] to match SIREN output
+
+    return GraphSpatioTemporalVolume3D(volume, latent_dim=latent_dim)
+
+
+class GraphSomaDataset(Dataset):
+    """
+    SOMA 3D ocean volumetric dataset: (x, y, z) coordinates -> scalar feature, with a time axis.
+
+    Each HDF5 key ("forward_0", "forward_1", ...) holds one trajectory shaped
+    [sx, sy, sz, time, feature]. Ocean/land is distinguished by a sentinel mask
+    (invalid cells hold a value <= -1000 at time 0).
+    """
+
+    def __init__(
+        self,
+        data_path,
+        train_num=1,
+        feature_set=None,
+        space_factor=1,
+        time_factor=1,
+        latent_dim=256,
+        mmap_dir=None,
+        missing_rate=0.0,
+    ):
+        super().__init__()
+        self.name = "SOMA"
+        self.data_path = data_path
+        self.space_factor = space_factor
+        self.time_factor = time_factor
+        self.feature_set = feature_set if feature_set is not None else [0]
+        self.latent_dim = latent_dim
+        self.missing_rate = missing_rate
+
+        self.hdf5_file = h5py.File(self.data_path, "r")
+        self.keys = list(self.hdf5_file.keys())[:train_num]
+
+        self.mmap_dir = mmap_dir
+        if self.mmap_dir:
+            self.mmap_data = RaggedMmap(self.mmap_dir)
+
+        self._cal_cor_and_time_emb()
+        self.latent_vectors = [torch.zeros(self.T, self.latent_dim) for _ in self.keys]
+
+    def _reduce_resolution(self, data):
+        data = data[
+            :: self.space_factor,
+            :: self.space_factor,
+            :: self.space_factor,
+            :: self.time_factor,
+        ]
+        assert len(self.feature_set) == 1, "GraphSomaDataset supports selecting exactly one feature channel"
+        return data[..., self.feature_set]
+
+    def _load_raw_data(self, idx):
+        if self.mmap_dir:
+            data = torch.from_numpy(self.mmap_data[idx])
+        else:
+            data = torch.from_numpy(self.hdf5_file[self.keys[idx]][:])
+        return data.permute(1, 2, 3, 0, 4)  # -> (sx, sy, sz, time, feature)
+
+    def _spatial_embedding(self, sx, sy, sz, cor):
+        x = torch.arange(sx, dtype=torch.float32)
+        y = torch.arange(sy, dtype=torch.float32)
+        z = torch.arange(sz, dtype=torch.float32)
+        X, Y, Z = torch.meshgrid(x, y, z, indexing="ij")
+        lin_emb = lambda v, n: 2.0 * v / (n - 1) - 1.0
+        grid = torch.stack((lin_emb(X, sx), lin_emb(Y, sy), lin_emb(Z, sz)), dim=-1)
+        grid = grid[:: self.space_factor, :: self.space_factor, :: self.space_factor]
+        return grid[cor[:, 0], cor[:, 1], cor[:, 2]]
+
+    def _cal_cor_and_time_emb(self):
+        raw = self._load_raw_data(0)
+        sx, sy, sz = raw.shape[0:3]
+        data = self._reduce_resolution(raw)
+
+        mask = data[..., 0, 0] > -1000  # sentinel value marks land/invalid cells
+        self.T = data.size(3)
+
+        cor = mask.nonzero()
+        spatial_emb = self._spatial_embedding(sx, sy, sz, cor)
+        time_list = [torch.full((len(cor),), t, dtype=torch.long) for t in range(self.T)]
+
+        self.cor_t = cor.repeat(self.T, 1)
+        self.space_emb_t = spatial_emb.repeat(self.T, 1)
+        self.time_t = torch.cat(time_list, dim=0)
+
+    def __len__(self):
+        return len(self.keys)
+
+    def __getitem__(self, idx):
+        data = self._reduce_resolution(self._load_raw_data(idx))
+        feat_t = data[self.cor_t[:, 0], self.cor_t[:, 1], self.cor_t[:, 2], self.time_t]
+
+        if self.missing_rate > 0:
+            keep = torch.rand(self.cor_t.size(0)) > self.missing_rate
+            cor_t, space_emb_t, time_t, feat_t = (
+                self.cor_t[keep], self.space_emb_t[keep], self.time_t[keep], feat_t[keep],
+            )
+        else:
+            cor_t, space_emb_t, time_t = self.cor_t, self.space_emb_t, self.time_t
+
+        return Data(
+            cor=cor_t,
+            time=time_t,
+            feat=feat_t,
+            T=torch.tensor(self.T),
+            latent_vector=self.latent_vectors[idx],
+            space_emb=space_emb_t,
+        )
+
+    def __del__(self):
+        if hasattr(self, "hdf5_file"):
+            self.hdf5_file.close()
+
+
+def create_soma_dataset(
+    data_path,
+    latent_dim=256,
+    space_factor=1,
+    time_factor=1,
+    feature_set=None,
+    train_num=1,
+    seed=42,
+    single_image=True,
+    mmap_dir=None,
+):
+    """
+    Create a SOMA 3D ocean volumetric graph dataset from a `thedataset-*.hdf5` file.
+
+    Args:
+        data_path: path to the SOMA HDF5 file (keys "forward_0", "forward_1", ...).
+        latent_dim: latent vector width.
+        space_factor: spatial subsampling stride (applied to x, y, and z).
+        time_factor: temporal subsampling stride.
+        feature_set: single-element list selecting which feature channel to use.
+        train_num: number of HDF5 keys (trajectories) to load.
+        seed: reserved for future split support.
+        single_image: only True is supported in current single-image INR flow.
+        mmap_dir: optional precomputed RaggedMmap directory, used instead of the raw HDF5 file.
+    """
+    del seed  # reserved for future split support
+
+    if not single_image:
+        raise NotImplementedError(
+            "create_soma_dataset currently supports single_image=True only"
+        )
+
+    return GraphSomaDataset(
+        data_path=data_path,
+        train_num=train_num,
+        feature_set=feature_set,
+        space_factor=space_factor,
+        time_factor=time_factor,
+        latent_dim=latent_dim,
+        mmap_dir=mmap_dir,
+        missing_rate=0.0,
     )
 
 

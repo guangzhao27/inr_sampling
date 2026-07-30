@@ -25,7 +25,7 @@ adaptive_mode="loss_sqrt_std"
 adaptive_iterations=8
 adaptive_equal_cell_topk="True"
 adaptive_equal_cell_topk_count_mode="same"
-adaptive_equal_cell_topk_weight_mode="loss_sqrt"
+adaptive_equal_cell_topk_weight_mode="loss_powered_weight"
 adaptive_weight_mode="none"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

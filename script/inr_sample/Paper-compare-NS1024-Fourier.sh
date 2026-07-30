@@ -107,8 +107,8 @@ for adaptive_iterations in 3 4; do
       adaptive_iterations=5
       adaptive_equal_cell_topk="True"
       adaptive_equal_cell_topk_count_mode="same"
-      adaptive_equal_cell_topk_weight_mode="area_over_count"
-      adaptive_weight_mode="area_over_count"
+      adaptive_equal_cell_topk_weight_mode="unbiased_weight"
+      adaptive_weight_mode="unbiased_weight"
       power_for_loss_as_weight=1.0
       adaptive_grid_update_interval=200
     
@@ -118,7 +118,7 @@ for adaptive_iterations in 3 4; do
       adaptive_iterations=5
       adaptive_equal_cell_topk="True"
       adaptive_equal_cell_topk_count_mode="same"
-      adaptive_equal_cell_topk_weight_mode="loss_sqrt"
+      adaptive_equal_cell_topk_weight_mode="loss_powered_weight"
       adaptive_weight_mode="none"
       power_for_loss_as_weight=0.25
 
@@ -128,7 +128,7 @@ for adaptive_iterations in 3 4; do
       adaptive_iterations=5
       adaptive_equal_cell_topk="True"
       adaptive_equal_cell_topk_count_mode="same"
-      adaptive_equal_cell_topk_weight_mode="loss_sqrt"
+      adaptive_equal_cell_topk_weight_mode="loss_powered_weight"
       adaptive_weight_mode="none"
       power_for_loss_as_weight=1.0
     
@@ -137,7 +137,7 @@ for adaptive_iterations in 3 4; do
       adaptive_mode="loss_sqrt_std"
       adaptive_equal_cell_topk="True"
       adaptive_equal_cell_topk_count_mode="same"
-      adaptive_equal_cell_topk_weight_mode="loss_sqrt"
+      adaptive_equal_cell_topk_weight_mode="loss_powered_weight"
       adaptive_weight_mode="none"
       power_for_loss_as_weight=0.25
 
@@ -172,7 +172,6 @@ for adaptive_iterations in 3 4; do
         inr.hidden_dim=155 \
         inr.fourier_mapping_size=512 \
         inr.w0=$w0 \
-        save_checkpoints=False \
         wandb.name=$run_name \
         wandb.use_wandb=True \
         wandb.project=$project_name \

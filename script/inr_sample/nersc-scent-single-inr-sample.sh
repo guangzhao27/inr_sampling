@@ -89,7 +89,7 @@ for time_frame in 100 120 140 160 180 200; do
       adaptive_iterations=8
       adaptive_equal_cell_topk="True"
       adaptive_equal_cell_topk_count_mode="same"
-      adaptive_equal_cell_topk_weight_mode="loss_sqrt"
+      adaptive_equal_cell_topk_weight_mode="loss_powered_weight"
       adaptive_weight_mode="none"
       power_for_loss_as_weight=0.25
     if [[ "$case_name" == "full" ]]; then
@@ -100,8 +100,8 @@ for time_frame in 100 120 140 160 180 200; do
       adaptive_iterations=8
       adaptive_equal_cell_topk="True"
       adaptive_equal_cell_topk_count_mode="same"
-      adaptive_equal_cell_topk_weight_mode="area_over_count"
-      adaptive_weight_mode="area_over_count"
+      adaptive_equal_cell_topk_weight_mode="unbiased_weight"
+      adaptive_weight_mode="unbiased_weight"
       power_for_loss_as_weight=1.0
 
     # if [[ "$case_name" == "random" ]]; then
@@ -119,11 +119,11 @@ for time_frame in 100 120 140 160 180 200; do
     #   adaptive_equal_cell_topk="True"
     #   adaptive_weight_mode="none"
     #   adaptive_equal_cell_topk_weight_mode="none"
-    # elif [[ "$case_name" == "adaptive_topk_area_over_count" ]]; then
+    # elif [[ "$case_name" == "adaptive_topk_unbiased_weight" ]]; then
     #   sample_type="2d_grid_adaptive"
     #   adaptive_equal_cell_topk="True"
-    #   adaptive_weight_mode="area_over_count"
-    #   adaptive_equal_cell_topk_weight_mode="area_over_count"
+    #   adaptive_weight_mode="unbiased_weight"
+    #   adaptive_equal_cell_topk_weight_mode="unbiased_weight"
     else
       echo "Unknown case: $case_name"
       continue

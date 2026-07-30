@@ -1,51 +1,50 @@
 import os
 import sys
 from pathlib import Path
+
 # sys.path.append('/pscratch/sd/g/gzhao27/INR/coral')
 sys.path.append(str(Path(__file__).parents[1]))
 print(sys.executable)
+from time import time
+
 import hydra
 import numpy as np
 import torch
 import torch.nn as nn
-from util.logger import log
-from itertools import islice
-from time import time
 
+from util.logger import log
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 os.environ["WANDB_DIR"] = str(REPO_ROOT / "coral" / "wandb")
 os.environ["RESULTS_DIR"] = ''
 
-import wandb
+from datetime import datetime
+
 from omegaconf import DictConfig, OmegaConf
-from utils.data.unstructure_dataset import (
-    GraphNavierStokes,
-    collate_graph_inr,
-    create_piecewise_dataset,
-    get_graph_t_idx,
-    create_ns_dataset,
-    create_burgers2d_dataset,
-    create_poolboiling2d_dataset,
-)
-from train_utility_sampling.train_utility import (
-    train_step, 
-    validation_step,
-    save_sampling_result,
-    train_step_single_image,
-    validation_step_single_image,
-)
+from torch_geometric.data import Data
+
+import wandb
 from train_utility_sampling.SamplerWrapper import (
     create_inr_sampler,
 )
+from train_utility_sampling.train_utility import (
+    train_step_single_image,
+    validation_step_single_image,
+)
 from utils.data.load_data import set_seed
-from utils.load_inr import create_inr_instance, load_inr_model
-from datetime import datetime
-from time import time
-from torch_geometric.data import Data
-import pandas as pd 
+from utils.data.unstructure_dataset import (
+    create_burgers2d_dataset,
+    create_ns3d_dataset,
+    create_ns_dataset,
+    create_piecewise_dataset,
+    create_poolboiling2d_dataset,
+    create_poolboiling3d_dataset,
+    create_soma_dataset,
+    get_graph_t_idx,
+)
+from utils.load_inr import create_inr_instance
+
 # import seaborn as sns
-import matplotlib.pyplot as plt
 
 def initialize_wandb(cfg):
     if cfg.wandb.use_wandb:
@@ -74,15 +73,15 @@ def initialize_wandb(cfg):
         print("id", run.id)
         print("dir", run.dir)
         return run
-    
+
 # def create_inr_sampler(cfg, inr, graph, current_date_str, run_name, device='cuda'):
 #     """
-#     Build and return an INRSingle2dSamplerWrapper or EVOSSampler based on cfg.sampling 
+#     Build and return an INRSingle2dSamplerWrapper or EVOSSampler based on cfg.sampling
 #     settings, or None if no sampling type is specified.
 #     """
 #     sampling_type = cfg.sampling.type
 #     image_width = graph.cor.max().item() + 1  # Set image width from space_emb shape
-    
+
 #     if sampling_type is None:
 #         return None
 
@@ -180,6 +179,48 @@ def _build_trainset(cfg, latent_dim, data_path, dataset_name, data_type, seed, s
             file_name=cfg.data.get("poolboiling_file", None),
         )
         feat_transform, feat_inv_transform = None, None
+    elif dataset_name == "NS3D":
+        input_dim = 3
+        output_dim = 1
+        trainset = create_ns3d_dataset(
+            data_path=data_path,
+            latent_dim=latent_dim,
+            space_factor=space_factor,
+            sample_idx=cfg.data.get("ns3d_sample_idx", 0),
+            time_start=cfg.data.get("volume_time_start", 0),
+            num_frames=cfg.data.get("volume_num_frames", 64),
+        )
+        feat_transform, feat_inv_transform = None, None
+    elif dataset_name == "PoolBoiling3D":
+        input_dim = 3
+        output_dim = 1
+        trainset = create_poolboiling3d_dataset(
+            data_dir=data_path,
+            latent_dim=latent_dim,
+            space_factor=space_factor,
+            field_key=cfg.data.get("poolboiling_key", "temperature"),
+            condition=cfg.data.get("poolboiling_condition", 100),
+            file_name=cfg.data.get("poolboiling_file", None),
+            sample_idx=cfg.data.get("poolboiling_sample_idx", 0),
+            time_start=cfg.data.get("volume_time_start", 0),
+            num_frames=cfg.data.get("volume_num_frames", 64),
+        )
+        feat_transform, feat_inv_transform = None, None
+    elif dataset_name == "SOMA":
+        input_dim = 3
+        output_dim = 1
+        trainset = create_soma_dataset(
+            data_path=data_path,
+            latent_dim=latent_dim,
+            space_factor=space_factor,
+            time_factor=cfg.data.get("time_factor", 1),
+            feature_set=cfg.data.get("soma_feature_set", [0]),
+            train_num=cfg.data.get("soma_train_num", 1),
+            seed=seed,
+            single_image=True,
+            mmap_dir=cfg.data.get("soma_mmap_dir", None),
+        )
+        feat_transform, feat_inv_transform = None, None
     else:
         raise NotImplementedError(f"The dataset ${dataset_name} does not have a corresponding class.")
 
@@ -197,7 +238,9 @@ def _select_single_graph(trainset, cfg, dataset_name):
     graph = trainset[graph_sample_idx]
 
     t = cfg.data.single_time_frame
-    if dataset_name == "Piecewise2D":
+    if dataset_name in ("Piecewise2D", "PoolBoiling3D", "NS3D"):
+        # These datasets pack their whole domain into one graph with time==0;
+        # frame-selection must return the entire (x, y, t) cube, not a slice.
         t = 0
 
     indices_t = get_graph_t_idx(graph, t)
@@ -226,16 +269,16 @@ def main(cfg: DictConfig) -> None:
     # neceassary for some reason now
     torch.set_default_dtype(torch.float32)
     current_date_str = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
-    
+
     # data
     saved_checkpoint = cfg.saved_checkpoint
     if saved_checkpoint:
         checkpoint = torch.load(cfg.checkpoint_path)
         cfg = checkpoint['cfg']
         print('---------Load Checkpoint------------------')
-    
+
     print(OmegaConf.to_yaml(cfg))
-    
+
     # Gradient norms
     grad_norms = []
 
@@ -250,7 +293,7 @@ def main(cfg: DictConfig) -> None:
     space_factor = cfg.data.space_factor
     time_factor = cfg.data.time_factor
     seed = cfg.data.seed
-    
+
     ntrain = cfg.data.ntrain
     ntest = cfg.data.ntest
     data_type = cfg.data.data_type
@@ -266,7 +309,7 @@ def main(cfg: DictConfig) -> None:
     )
     lr_inr = cfg.optim.lr_inr  # lr_inr is learning parameter initial value, also the meta learning rate
     optimizer_name = str(cfg.optim.get("optimizer", "adamw")).lower()
-    lr_code = cfg.optim.lr_code 
+    lr_code = cfg.optim.lr_code
     meta_lr_code = cfg.optim.meta_lr_code # meta learning rate to learn
     weight_decay_code = cfg.optim.weight_decay_code
     inner_steps = cfg.optim.inner_steps
@@ -282,9 +325,9 @@ def main(cfg: DictConfig) -> None:
 
     device = torch.device("cuda")
     set_seed(seed)
-    
-   
-   
+
+
+
     """ define dataset """
     trainset, input_dim, output_dim, feat_transform, feat_inv_transform = _build_trainset(
         cfg=cfg,
@@ -312,14 +355,14 @@ def main(cfg: DictConfig) -> None:
     log.start_timer("final")
     total_train_time = 0
     t0 = time()
-    
+
     """ Initialize model, optimizer """
     inr = create_inr_instance(
         cfg, input_dim=input_dim, output_dim=output_dim, device=device
     )  # add sampler to model
     trainable_params = sum(p.numel() for p in inr.parameters() if p.requires_grad)
     print("inr model parameters:", {trainable_params})
-    
+
     alpha = nn.Parameter(torch.Tensor([lr_code]).to(device))
     meta_lr_code = meta_lr_code
     weight_decay_lr_code = weight_decay_code
@@ -353,13 +396,13 @@ def main(cfg: DictConfig) -> None:
     else:   # EVOS uses 1 based indexing for epochs
         epoch_start = 0
     best_loss = np.inf
-    
 
-    
+
+
     """ Update model and optimizer with checkpoint"""
     if saved_checkpoint:
         inr.load_state_dict(checkpoint['inr'])
-        optimizer.load_state_dict(checkpoint['optimizer_inr']) 
+        optimizer.load_state_dict(checkpoint['optimizer_inr'])
         epoch_start = checkpoint['epoch']
         alpha = checkpoint['alpha']
         best_loss = checkpoint['loss']
@@ -368,12 +411,12 @@ def main(cfg: DictConfig) -> None:
 
     # if cfg.wandb.use_wandb:
     #     wandb.log({"results_dir": str(RESULTS_DIR)}, step=epoch_start, commit=False)
-    
+
     # if cfg.sampling.type in ['3d_cluster']:
     #     cluster_dim = '2d'
     #     add_cluster_label(train_loader, 1000, 0.01, cluster_dim=cluster_dim)
     #     add_cluster_label(val_loader, 1000, 0.01, cluster_dim=cluster_dim)
-    
+
     # graph = Data(
     #     cor=graph.cor[indices_t],
     #     feat=graph.feat[indices_t],
@@ -388,10 +431,10 @@ def main(cfg: DictConfig) -> None:
     inr_sampler = create_inr_sampler(cfg, inr, graph, current_date_str, run_name)
     if cfg.sampling.type == "EVOS":
         inr_sampler._evos_init()
-        
+
     # for _ in range(3):  # a few steps to warm up
     #     train_loss, rel_train_loss, grad_norm = train_step_single_image(
-    #         -1, graph, inr, 
+    #         -1, graph, inr,
     #         device=device,
     #         use_rel_loss=False,
     #         optimizer=optimizer,
@@ -400,12 +443,12 @@ def main(cfg: DictConfig) -> None:
     #         )
 
     # torch.cuda.synchronize()  # make sure GPU ops are done
-    
+
     # Main Training Loop
     ''' Begin the training process '''
     # log.start_timer("step")
     for step in range(epoch_start, epochs):
-        
+
         use_rel_loss = True
         step_show = step % evo_every_epochs == 0
         step_show_last = step == epochs - 1
@@ -413,7 +456,7 @@ def main(cfg: DictConfig) -> None:
         # Start Timer
         t1 = time()
         train_loss, rel_train_loss, grad_norm = train_step_single_image(
-            step, graph, inr, 
+            step, graph, inr,
             device=device,
             use_rel_loss=use_rel_loss,
             optimizer=optimizer,
@@ -441,23 +484,23 @@ def main(cfg: DictConfig) -> None:
                     #     n_clusters = _start + ((_end - _start) / epochs) * step
                     #     graph_2d_cluster_single_image(graph_ori, n_clusters, 0.01, 'grid')
                     inr_sampler.sample(
-                        inner_step=step, 
-                        graph=graph, 
+                        inner_step=step,
+                        graph=graph,
                         save_image=True,
                     )
                 elif cfg.sampling.type == "EVOS" and step % 100 == 0:
                     inr_sampler.sample(
-                        inner_step=step, 
-                        graph=graph, 
+                        inner_step=step,
+                        graph=graph,
                         save_image=True,
                         epoch=step
                     )
             test_loss, rel_test_loss, psnr, ssim = validation_step_single_image(
-                step, graph, inr, 
-                device=device, 
+                step, graph, inr,
+                device=device,
                 use_rel_loss=use_rel_loss,
                 optimizer=optimizer,
-                visualization_sampler=inr_sampler,
+                visualization_sampler=inr_sampler if cfg.get("save_sampled_frames", True) else None,
                 cfg = cfg
                 )
 
@@ -468,7 +511,7 @@ def main(cfg: DictConfig) -> None:
                         "train_rel_loss": rel_train_loss,
                         "test_loss": test_loss,
                         "train_loss": train_loss,
-                        "Time": total_train_time, 
+                        "Time": total_train_time,
                         "psnr": psnr,
                         "ssim": ssim,
                         "sampled_points": sampled_points,
@@ -489,45 +532,29 @@ def main(cfg: DictConfig) -> None:
                     f"Sampled Points: {sampled_points} ({sampled_ratio:.4f})"
                 )
             loss_to_check = rel_test_loss if use_rel_loss else test_loss
-            dir_path = REPO_ROOT / "Results" / "checkpoints" / f"{current_date_str + run_name_str}"
-            dir_path.mkdir(parents=True, exist_ok=True)
-
-            # Build graph snapshot (CPU) for visualization/reconstruction scripts.
-            _graph_data = {
-                "cor": graph_ori.cor.detach().cpu(),
-                "space_emb": graph_ori.space_emb.detach().cpu(),
-                "feat": graph_ori.feat.detach().cpu(),
-                "time": graph_ori.time.detach().cpu(),
-            }
-
-            # Save one checkpoint for every evaluation step.
-            _eval_ckpt = {
-                "cfg": cfg,
-                "epoch": step,
-                "inr": inr.state_dict(),
-                "optimizer_inr": optimizer.state_dict(),
-                "loss": loss_to_check,
-                "best_loss": best_loss,
-                "alpha": alpha,
-                "feat_transform": feat_transform,
-                "feat_inv_transform": feat_inv_transform,
-                "input_dim": input_dim,
-                "output_dim": output_dim,
-                "graph_data": _graph_data,
-            }
-            _eval_savepath = dir_path / f"eval_{step}.pt"
-            torch.save(_eval_ckpt, str(_eval_savepath))
-
-            if loss_to_check < best_loss:
+            is_best = loss_to_check < best_loss
+            if is_best:
                 best_loss = loss_to_check
-                savepath = dir_path / f"{step}.pt"
 
-                _ckpt = {
+            checkpoint_mode = getattr(cfg, "checkpoint_mode", "none")
+            if checkpoint_mode == "all":
+                dir_path = REPO_ROOT / "Results" / "checkpoints" / f"{current_date_str + run_name_str}"
+                dir_path.mkdir(parents=True, exist_ok=True)
+
+                _graph_data = {
+                    "cor": graph_ori.cor.detach().cpu(),
+                    "space_emb": graph_ori.space_emb.detach().cpu(),
+                    "feat": graph_ori.feat.detach().cpu(),
+                    "time": graph_ori.time.detach().cpu(),
+                }
+
+                _eval_ckpt = {
                     "cfg": cfg,
                     "epoch": step,
                     "inr": inr.state_dict(),
                     "optimizer_inr": optimizer.state_dict(),
-                    "loss": best_loss,
+                    "loss": loss_to_check,
+                    "best_loss": best_loss,
                     "alpha": alpha,
                     "feat_transform": feat_transform,
                     "feat_inv_transform": feat_inv_transform,
@@ -535,58 +562,74 @@ def main(cfg: DictConfig) -> None:
                     "output_dim": output_dim,
                     "graph_data": _graph_data,
                 }
-                torch.save(_ckpt, str(savepath))
+                torch.save(_eval_ckpt, str(dir_path / f"eval_{step}.pt"))
 
-                # Also save best checkpoint to a local, predictable path
-                _local_ckpt_dir = './checkpoints'
-                os.makedirs(_local_ckpt_dir, exist_ok=True)
-                _local_ckpt_path = os.path.join(
-                    _local_ckpt_dir,
-                    f'{current_date_str}_{run_name_str}_best.pt'
-                )
-                torch.save(_ckpt, _local_ckpt_path)
-                print(f'[Checkpoint] Best model (step {step}, loss {best_loss:.6f}) saved to: {_local_ckpt_path}')
-    
+                if is_best:
+                    _ckpt = {
+                        "cfg": cfg,
+                        "epoch": step,
+                        "inr": inr.state_dict(),
+                        "optimizer_inr": optimizer.state_dict(),
+                        "loss": best_loss,
+                        "alpha": alpha,
+                        "feat_transform": feat_transform,
+                        "feat_inv_transform": feat_inv_transform,
+                        "input_dim": input_dim,
+                        "output_dim": output_dim,
+                        "graph_data": _graph_data,
+                    }
+                    torch.save(_ckpt, str(dir_path / f"{step}.pt"))
+
+                    _local_ckpt_dir = './checkpoints'
+                    os.makedirs(_local_ckpt_dir, exist_ok=True)
+                    _local_ckpt_path = os.path.join(
+                        _local_ckpt_dir,
+                        f'{current_date_str}_{run_name_str}_best.pt'
+                    )
+                    torch.save(_ckpt, _local_ckpt_path)
+                    print(f'[Checkpoint] Best model (step {step}, loss {best_loss:.6f}) saved to: {_local_ckpt_path}')
+
     log.end_timer("final")
     print("TIME:", total_train_time)
 
-    # Save final checkpoint after training completes
-    _graph_data_final = {
-        "cor": graph_ori.cor.detach().cpu(),
-        "space_emb": graph_ori.space_emb.detach().cpu(),
-        "feat": graph_ori.feat.detach().cpu(),
-        "time": graph_ori.time.detach().cpu(),
-    }
-    _final_ckpt_dir = './checkpoints'
-    os.makedirs(_final_ckpt_dir, exist_ok=True)
-    _final_ckpt_path = os.path.join(
-        _final_ckpt_dir,
-        f'{current_date_str}_{run_name_str}_final.pt'
-    )
-    torch.save(
-        {
-            "cfg": cfg,
-            "epoch": epochs - 1,
-            "inr": inr.state_dict(),
-            "optimizer_inr": optimizer.state_dict(),
-            "loss": best_loss,
-            "alpha": alpha,
-            "feat_transform": feat_transform,
-            "feat_inv_transform": feat_inv_transform,
-            "input_dim": input_dim,
-            "output_dim": output_dim,
-            "graph_data": _graph_data_final,
-        },
-        _final_ckpt_path,
-    )
-    print(f'[Checkpoint] Final model saved to: {_final_ckpt_path}')
+    checkpoint_mode = getattr(cfg, "checkpoint_mode", "none")
+    if checkpoint_mode in ("final", "all"):
+        _graph_data_final = {
+            "cor": graph_ori.cor.detach().cpu(),
+            "space_emb": graph_ori.space_emb.detach().cpu(),
+            "feat": graph_ori.feat.detach().cpu(),
+            "time": graph_ori.time.detach().cpu(),
+        }
+        _final_ckpt_dir = './checkpoints'
+        os.makedirs(_final_ckpt_dir, exist_ok=True)
+        _final_ckpt_path = os.path.join(
+            _final_ckpt_dir,
+            f'{current_date_str}_{run_name_str}_final.pt'
+        )
+        torch.save(
+            {
+                "cfg": cfg,
+                "epoch": epochs - 1,
+                "inr": inr.state_dict(),
+                "optimizer_inr": optimizer.state_dict(),
+                "loss": best_loss,
+                "alpha": alpha,
+                "feat_transform": feat_transform,
+                "feat_inv_transform": feat_inv_transform,
+                "input_dim": input_dim,
+                "output_dim": output_dim,
+                "graph_data": _graph_data_final,
+            },
+            _final_ckpt_path,
+        )
+        print(f'[Checkpoint] Final model saved to: {_final_ckpt_path}')
 
     # Output stats to file
     # with open('/sdcc/u/smccue/projects/inr_sampling/visuals/out.txt', 'a') as f:
     #     trl_vals = (','.join(str(v) for v in trl_vals_arr))
     #     time_vals = (','.join(str(v) for v in time_vals_arr))
     #     step_vals = (','.join(str(v) for v in step_vals_arr))
-    #     print(str(cfg.sampling.type) + 
+    #     print(str(cfg.sampling.type) +
     #             "\ntrl\n" + str(trl_vals) +
     #             "\ntime\n" + str(time_vals) +
     #             "\nstep\n" + str(step_vals),

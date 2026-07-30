@@ -1,20 +1,20 @@
+import os
 from functools import partial
 from typing import Optional
+
+import matplotlib.colors as mcolors
+import matplotlib.pyplot as plt
+import numpy as np
+import seaborn as sns
 import torch
 import torch.nn as nn
-import torch.utils.checkpoint as cp
-from torch.nn.parallel import DistributedDataParallel as DDP
-from . import losses
-import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
-import matplotlib.colors as mcolors
-from omegaconf import DictConfig, OmegaConf
 import torch.nn.functional as F
-import os
-from time import time
-
+import torch.utils.checkpoint as cp
 from skimage.metrics import structural_similarity as ssim
+from torch.nn.parallel import DistributedDataParallel as DDP
+
+from . import losses
+
 
 def psnr(img1, img2, max_val=None):
     """
@@ -27,22 +27,22 @@ def psnr(img1, img2, max_val=None):
         img1 = img1.detach().cpu().numpy()
     if isinstance(img2, torch.Tensor):
         img2 = img2.detach().cpu().numpy()
-    
+
     # Auto-detect max_val if not provided
     if max_val is None:
         # Calculate the full dynamic range of the data
         data_min = min(img1.min(), img2.min())
         data_max = max(img1.max(), img2.max())
         max_val = data_max - data_min
-        
+
         # Handle edge case where all values are the same
         if max_val == 0:
             max_val = 1.0  # Default fallback
-    
+
     mse = np.mean((img1 - img2) ** 2)
     if mse == 0:
         return float('inf')
-    
+
     psnr_val = 20 * np.log10(max_val / np.sqrt(mse))
     return psnr_val
 
@@ -56,7 +56,7 @@ def calculate_ssim(img1, img2):
         img1 = img1.detach().cpu().numpy()
     if isinstance(img2, torch.Tensor):
         img2 = img2.detach().cpu().numpy()
-    
+
     # Ensure images are in the right format for SSIM
     # If images have channel dimension, we need to handle it
     if img1.ndim == 3:
@@ -64,7 +64,7 @@ def calculate_ssim(img1, img2):
             img1 = img1.transpose(1, 2, 0)
         if img2.shape[0] <= 4:  # Channel first format (C, H, W)
             img2 = img2.transpose(1, 2, 0)
-    
+
     # For grayscale images
     if img1.ndim == 2:
         return ssim(img1, img2, data_range=img1.max() - img1.min())
@@ -145,13 +145,13 @@ def grad_norm_pixel_image(pix_norms, step, cfg):
     try:
         os.makedirs(path, exist_ok=True)
         print("Directory created")
-    except OSError as error:
+    except OSError:
         print("Directory can not be created")
 
     save_path = f"/sdcc/u/smccue/projects/inr_sampling/visuals/norms/depth_{depth}/pixel_grad_norms_depth_{depth}_step_{step}.png"
     plt.savefig(save_path)
     plt.close()
-    
+
 def gradient_similarity(pix_norms, pix_grads, step, cfg, loss, optimizer, inr):
     depth = cfg.inr.depth
     print("pix grads shape: " + str(len(pix_grads)))
@@ -178,7 +178,7 @@ def gradient_similarity(pix_norms, pix_grads, step, cfg, loss, optimizer, inr):
     try:
         os.makedirs(path, exist_ok=True)
         print("Directory created")
-    except OSError as error:
+    except OSError:
         print("Directory can not be created")
 
     save_path = f"/sdcc/u/smccue/projects/inr_sampling/visuals/norms/depth_{depth}/correlation/{cfg.sampling.type}/gradient_correlation_depth_{depth}_step_{step}.png"
@@ -213,19 +213,19 @@ def graph_inner_loop(
         gradient_checkpointing (bool): If True uses gradient checkpointing. This
             can massively reduce memory consumption.
     """
-    
-    
+
+
     fitted_modulations = torch.zeros_like(graph_ori.latent_vector).requires_grad_()
-    
+
     for inner_step in range(inner_steps):
         # print("In the inner step")
         if sampler is not None:
             # print("Reached the sample step")
             graph = sampler.sample(
-                outer_step=outer_step, 
-                inner_step=inner_step, 
-                graph=graph_ori, 
-                modulations=fitted_modulations, 
+                outer_step=outer_step,
+                inner_step=inner_step,
+                graph=graph_ori,
+                modulations=fitted_modulations,
                 save_image=save_image)
         else:
             graph = graph_ori
@@ -337,7 +337,7 @@ def mse_points_image(per_pix_losses, step, cfg):
     try:
         os.makedirs(path, exist_ok=True)
         print("Directory created")
-    except OSError as error:
+    except OSError:
         print("Directory can not be created")
 
     save_path = f"/sdcc/u/smccue/projects/inr_sampling/visuals/norms/depth_{depth}/pixel_mse_depth_{depth}_step_{step}.png"
@@ -375,7 +375,7 @@ def graph_outer_step(
         modulation: Shape (batch_size, hidden_dim). Note that with sub_array_num>1, the batch_size is the sub_batch_size,  
         and the graph.time is adjust to start with 0, i.e. (3, 4, 5) -> (0, 1, 2)
     """
-    
+
     if loss_type == "mse":
         loss_fn = losses.batch_mse_fn
     elif loss_type == "bce":
@@ -440,13 +440,13 @@ def graph_outer_step(
     return outputs
 
 def single_image_step(
-    inr, 
-    graph_ori, 
+    inr,
+    graph_ori,
     iter,
     is_train=True,
     return_reconstructions=False,
     use_rel_loss=False,
-    sampler=None, 
+    sampler=None,
     cfg=None,
 ):
     step = iter
@@ -458,8 +458,8 @@ def single_image_step(
             graph = sampler.sample(graph_ori, step)
         else:
             graph = sampler.sample(
-                inner_step=step, 
-                graph=graph_ori, 
+                inner_step=step,
+                graph=graph_ori,
                 save_image=False
             )
     else:
@@ -475,10 +475,24 @@ def single_image_step(
     coords = graph.space_emb
     if not is_train:
         with torch.no_grad():
-            features_recon = inr(coords)
+            # Chunk the full-volume validation forward along the point dimension:
+            # an INR is pointwise, so this is exactly equivalent, but a single
+            # forward over all coords (e.g. 16.8M voxels for NS3D 512x512x64 with
+            # a deep/wide SIREN) allocates >24GB of activations and OOMs an 80GB
+            # GPU. Chunking caps peak activation memory. Small inputs (<=chunk)
+            # take the original single-forward path unchanged.
+            n_pts = coords.shape[0]
+            _val_chunk = 2_000_000
+            if n_pts > _val_chunk:
+                features_recon = torch.cat(
+                    [inr(coords[i:i + _val_chunk]) for i in range(0, n_pts, _val_chunk)],
+                    dim=0,
+                )
+            else:
+                features_recon = inr(coords)
     else:
         features_recon = inr(coords)
-    
+
     if is_train and cfg.sampling.type == "EVOS":
         # print("===p recon===\n" + str(features_recon) + "\n===p features ===\n" + str(features) + "\n===step===\n" + str(step))
         # loss = sampler._sampler_compute_loss(features_recon, features, step)
@@ -493,22 +507,23 @@ def single_image_step(
     # Calculate PSNR and SSIM when return_reconstructions is True
     psnr_score = None
     ssim_score = None
-    
-    
+
+
     if not is_train:
-        # try:
+        if graph.cor.shape[1] >= 3:
+            # 3D coords (volumetric / spatio-temporal): PSNR is layout-free
+            # (flat MSE + data range), and 2D SSIM isn't defined for these
+            # coords. Compute PSNR on the flat tensors, skip SSIM. Works for
+            # both dense (x, y, t) cubes and sparse masked volumes (SOMA).
+            psnr_score = psnr(features_recon, features)
+            ssim_score = None
+        else:
             # Calculate PSNR and SSIM between reconstruction and ground truth
-        H = graph.cor.max().item()+1
-        features = features.view(H, H)
-        features_recon = features_recon.view(H, H)
-        psnr_score = psnr(features_recon, features)
-        
-        
-        ssim_score = calculate_ssim(features_recon, features)
-        # except Exception as e:
-        #     print(f"Error calculating PSNR/SSIM metrics: {e}")
-        #     psnr_score = 0.0
-        #     ssim_score = 0.0
+            H = graph.cor.max().item() + 1
+            features = features.view(H, H)
+            features_recon = features_recon.view(H, H)
+            psnr_score = psnr(features_recon, features)
+            ssim_score = calculate_ssim(features_recon, features)
 
     outputs = {
         "loss": loss,
@@ -517,5 +532,5 @@ def single_image_step(
         "psnr": psnr_score,
         "ssim": ssim_score,
     }
-    
+
     return outputs

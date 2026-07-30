@@ -22,3 +22,8 @@ CLAUDE.md
 /test/*
 /to-share/*
 .github/copilot-instructions.md
+/script/agent_exp_script/*
+/.claude/*
+/Agent-report/*
+todo.md
+rebuttal-archive-20260729.tar.zst

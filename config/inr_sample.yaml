@@ -12,7 +12,11 @@ hydra:
 #continue:
 saved_checkpoint : False
 checkpoint_path :
-save_checkpoints: True          # Whether to save checkpoints during training
+# checkpoint_mode controls what gets saved to Results/checkpoints/ and ./checkpoints/
+#   none  – no checkpoints saved (default for sweep runs)
+#   final – only the final model after training completes
+#   all   – eval checkpoint every evo_every_epochs steps + best + final
+checkpoint_mode: "none"
 save_sampled_frames: True       # Whether to save sampled frames (visualizations)
 
 data:
@@ -57,11 +61,22 @@ data:
   poolboiling_file:            # optional explicit file name, e.g. Twall-100.hdf5
   poolboiling_key: temperature # HDF5 field key for supervision target
   poolboiling_sample_idx: 0    # only used when selected field has shape [N, T, H, W]
+  # PoolBoiling3D / spatio-temporal (x, y, t) volume options (dataset_name = PoolBoiling3D)
+  volume_time_start: 0         # index of first temporal frame to stack into the cube
+  volume_num_frames: 64        # number of consecutive frames along the t axis
   # Piecewise2D dataset parameters (only used when dataset_name = Piecewise2D)
   piecewise_resolution: 1024   # grid size H = W = resolution
   piecewise_alpha: 20.0       # high-frequency multiplier in y (right half, x > 0.5)
   piecewise_beta: 1.0         # amplitude of high-frequency term
   piecewise_eps:  0.02        # smoothing width for step indicator; null = hard step
+  # SOMA runtime options (used when dataset_name = SOMA); data_path = path to
+  # thedataset-*.hdf5. Volumes are non-cubic (e.g. sx=100, sy=100, sz=30), so
+  # sampling.type=3d_* derives grid_shape from the actual coordinates, never a
+  # single square image_width.
+  soma_feature_set:
+    - 0                        # single-element list selecting which feature channel to use
+  soma_train_num: 1            # number of HDF5 keys (trajectories) to load
+  soma_mmap_dir:                # optional precomputed RaggedMmap dir, used instead of raw HDF5
 
 optim:
   optimizer: adamw   # supported: adamw, sgd
@@ -125,14 +140,46 @@ sampling:
   adaptive_iterations: 8            # only used by sampling.type=2d_grid_adaptive: quadtree iterative subdivision depth
   adaptive_equal_cell_topk: False   # only used by 2d_grid_adaptive: keep global top-k by prediction dif from sampled candidates
   adaptive_equal_cell_topk_count_mode: "same"  # only used when adaptive_equal_cell_topk=True: "same" or "poisson"
-  adaptive_equal_cell_topk_weight_mode: "none" # only used when adaptive_equal_cell_topk=True: "none" or "area_over_count" or "loss_sqrt"
-  power_for_loss_as_weight: 0.2 # only used when adaptive_equal_cell_topk=True and weight_mode="loss_sqrt"
-  adaptive_weight_mode: "inverse_value"  # only used by 2d_grid_adaptive: "none", "inverse_value", "area_over_count", "sampled_dif"
+  adaptive_equal_cell_topk_weight_mode: "none" # only used when adaptive_equal_cell_topk=True: "none" or "unbiased_weight" or "loss_powered_weight"
+  power_for_loss_as_weight: 0.2 # only used when adaptive_equal_cell_topk=True and weight_mode="loss_powered_weight"
+  adaptive_weight_mode: "inverse_value"  # only used by 2d_grid_adaptive: "none", "inverse_value", "unbiased_weight", "sampled_dif"
   adaptive_weight_value_eps: 1e-6   # denominator clamp for inverse_value mode
   adaptive_weight_clip_ratio: 10.0  # clip per-cell weights to median*ratio; <=0 disables clipping
   adaptive_grid_update_interval: 100  # only used by sampling.type=2d_grid_adaptive
+  subdivision_percentage: 20.0        # only used by sampling.type=2d_grid_adaptive: % of leaf cells split per iteration
+  # How the adaptive samplers turn cell scores into per-cell sample counts.
+  #   min_one (default, published ACES behaviour) - reserve 1 sample per cell, Poisson the
+  #     rest. Guarantees every leaf is represented each step, but CANNOT honour a budget
+  #     smaller than the cell count: with n <= n_cells the batch becomes n_cells, ignoring
+  #     sampling.rate. Even inside the budget the reserve is costly (226 leaves against a
+  #     294-sample budget spends 77% of the budget on the reserve).
+  #   soft - floor the EXPECTED allocation instead: n~_h = max(n*v_h/sum(v), frac*n/H)
+  #     renormalised to sum to n (water-filling), then n_h ~ Poisson(n~_h). Honours the
+  #     budget exactly for any cell count, keeps coverage in expectation, and leaves the
+  #     score-driven share of the budget intact. Cells may draw zero on a given step, so
+  #     the weight modes divide by the expected allocation rather than the realised count.
+  # Changing this changes ACES's behaviour, so existing results are only comparable within
+  # one mode. Default is left at min_one so published numbers reproduce.
+  adaptive_count_floor_mode: "min_one"  # "min_one" or "soft"
+  adaptive_count_floor_frac: 0.1        # only used when mode="soft": floor as a fraction of n/H
+  adaptive_initial_grid_size: 8       # 3d_grid_adaptive: octree initial grid = size^3 leaf cells (lower it for very low sampling rates so initial cells stay << n_samples)
   runtime_profile: True            # collect per-iteration runtime breakdown (forward/backward/sampling/partition-update)
   use_weight_function: True          # only used by sampling.type=2d_grid_linear_weighted
+  fixed_cell_size: 32               # only used by sampling.type=2d_grid_fixed: cell edge length in pixels
+  k_per_cell: 1                     # only used by sampling.type=2d_grid_fixed: samples drawn per cell
+  # --- fixed-grid stratified sampling (sampling.type=2d_grid_stratified / 3d_grid_stratified) ---
+  # Textbook stratified sampling on a FIXED uniform grid; the unbiased baseline that
+  # isolates how much of ACES's gain comes from adaptive partitioning rather than from
+  # stratification + optimal allocation. Points are weighted N_h / n~_h (Hansen-Hurwitz),
+  # which makes the training loss an unbiased estimate of the full-grid mean loss.
+  # Keep the total cell count BELOW the per-step sample budget (n = rate * n_points),
+  # otherwise most cells sit at the allocation floor and Neyman has nothing to allocate.
+  stratified_allocation: "neyman"   # "proportional" (n~_h ∝ N_h) or "neyman" (n~_h ∝ N_h·σ_h)
+  stratified_n_bins: 16             # cells per axis; scalar, or a length-3 list for 3D volumes
+  stratified_min_alloc_frac: 0.1    # floor on n~_h as a fraction of the uniform share n/H;
+                                    # caps Horvitz-Thompson weight blow-up without adding bias
+  stratified_update_interval: 500   # epochs between σ_h re-estimates (2D 500, 3D 100 — matches ACES)
+  stratified_pilot_per_cell: 16     # pilot points per cell for σ_h; scoring only, never trained on
   n_clusters_2d_start: 5
   n_clusters_2d_end: 10
   cluster_type: "slic"              # All below are for EVOS only

@@ -11,10 +11,10 @@ Main Components:
 4. Window-based gradient variance calculation
 """
 
-import torch
-from torch.func import functional_call, jacrev, vmap
 from collections import OrderedDict
 
+import torch
+from torch.func import functional_call, jacrev, vmap
 
 # ============================================================================
 # Section 1: Loss Function Utilities
@@ -41,10 +41,10 @@ def loss_function(features_recon, features):
 
 def estimate_frobenius_norm_corrected(
     loss,
-    model_output, 
+    model_output,
     params,
     input_x,
-    y_x,               
+    y_x,
     n_probes: int = 10,
 ):
     """
@@ -107,7 +107,7 @@ def estimate_frobenius_norm_corrected(
 
 
 def estimate_frobenius_norm_swaped(
-    loss_grad_x_tensor, 
+    loss_grad_x_tensor,
     params,
     device,
 ):
@@ -131,7 +131,7 @@ def estimate_frobenius_norm_swaped(
     """
     batch_size = loss_grad_x_tensor.shape[0]
     grad_norms = torch.zeros(batch_size, device=device)
-    
+
     # Compute gradient norm for each sample
     for b in range(batch_size):
         total_grad_norm = 0
@@ -139,18 +139,18 @@ def estimate_frobenius_norm_swaped(
         for i in range(2):
             # Compute parameter gradients for this coordinate dimension
             grad = torch.autograd.grad(
-                loss_grad_x_tensor[b, i], 
-                params, 
-                retain_graph=True, 
-                allow_unused=True, 
+                loss_grad_x_tensor[b, i],
+                params,
+                retain_graph=True,
+                allow_unused=True,
                 create_graph=False
             )
             # Flatten and concatenate all parameter gradients
             f_theta = torch.cat([g.reshape(-1) for g in grad if g is not None])
             total_grad_norm += (f_theta.detach()**2).sum()
-        
+
         grad_norms[b] = total_grad_norm
-        
+
     return grad_norms.sqrt()
 
 
@@ -182,7 +182,7 @@ def frobenius_norm_via_jacrev(inr, params, neighbor_coords, neighbor_targets, co
     else:
         params = OrderedDict(params)
     buffers = OrderedDict((n, b) for n, b in inr.named_buffers())
-    
+
     # Step 2: Ensure proper grouping by centers: [B, 4, ...]
     assert neighbor_coords.dim() == 2 and neighbor_coords.size(-1) == 2
     assert neighbor_targets.dim() == 2 and neighbor_targets.size(-1) == 1
@@ -235,7 +235,7 @@ def frobenius_norm_via_jacrev(inr, params, neighbor_coords, neighbor_targets, co
     for name, J in per_sample_jac.items():
         # J has shape [B, 2, *param.shape]
         frob_sq += (J ** 2).reshape(B, -1).sum(dim=1)
-    
+
     return frob_sq.sqrt()  # [B]
 
 
@@ -271,18 +271,18 @@ def cell_grad_variance_estimate_with_jacrev(cell_cor_range, graph, inr, device, 
     H = graph.cor.max().item() + 1
     features = graph.feat.view(H, H, 1)
     coords = graph.space_emb.view(H, H, 2)
-    
+
     # Select parameters (all or last layer only)
     params = list(inr.parameters())
     if approx_last_layer:
         params = list(inr.last_layer.parameters())
-    
+
     # Calculate coordinate step size
     coords_range = coords.max() - coords.min()
     coords_step = coords_range / (H - 1)
-    
+
     inr.to(device)
-    
+
     # change xy_list and width_list to cell_cor_range tensor
     # the cell_cor_range is of right shape [N, 4], with (r_start, r_end, c_start, c_end)
     r_indices = ((cell_cor_range[:, 0] + cell_cor_range[:, 1]) // 2).long()  # y coordinates -> row indices
@@ -293,7 +293,7 @@ def cell_grad_variance_estimate_with_jacrev(cell_cor_range, graph, inr, device, 
     # r_indices = xy_list[:, 1].long()  # y coordinates -> row indices
     # c_indices = xy_list[:, 0].long()  # x coordinates -> column indices
     # batch_size = len(r_indices)
-    
+
     # Collect 4 neighbors per center point
     neighbor_coords = []
     neighbor_targets = []
@@ -316,7 +316,7 @@ def cell_grad_variance_estimate_with_jacrev(cell_cor_range, graph, inr, device, 
 
     neighbor_coords = torch.stack(neighbor_coords, dim=0)    # [4B, 2]
     neighbor_targets = torch.stack(neighbor_targets, dim=0)  # [4B, 1]
-    
+
     # Move to GPU
     neighbor_coords = neighbor_coords.to(device)
     neighbor_targets = neighbor_targets.to(device)
@@ -427,6 +427,167 @@ def cell_loss_variance_estimate_with_taylor(cell_cor_range, graph, inr, device, 
     return loss_var_tensor
 
 
+# ============================================================================
+# Section 3a-bis: Batched (vectorised) per-cell pilot variance estimators
+#
+# These replace the original per-cell Python loops with a single batched
+# forward. They are a *pure refactor*: the sampling distribution is identical
+# (min(max_samples_per_cell, cell_size) points per cell, drawn uniformly with
+# replacement, population variance), only the RNG stream and the number of GPU
+# launches differ. The loop versions below now delegate here.
+# ============================================================================
+
+def _masked_population_variance(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    """Population variance along dim 1, ignoring masked-out entries.
+
+    Args:
+        values: (n_cells, k) per-point quantities.
+        mask:   (n_cells, k) bool, True where the entry is a real sample.
+
+    Returns:
+        (n_cells,) population variance; 0 for cells with no valid sample.
+    """
+    m = mask.to(values.dtype)
+    count = m.sum(dim=1)
+    safe = count.clamp_min(1.0)
+    mean = (values * m).sum(dim=1) / safe
+    var = ((values - mean.unsqueeze(1)).pow(2) * m).sum(dim=1) / safe
+    return torch.where(count > 0, var, torch.zeros_like(var))
+
+
+def _chunked_point_losses(coords_cpu, targets_cpu, inr, device, chunk):
+    """Forward `coords_cpu` through `inr` in chunks, returning per-point squared error."""
+    out = []
+    total = coords_cpu.size(0)
+    for i in range(0, total, chunk):
+        sc = coords_cpu[i:i + chunk].to(device)
+        st = targets_cpu[i:i + chunk].to(device)
+        out.append(loss_function(inr(sc), st).reshape(-1))
+    if not out:
+        return torch.empty(0, device=device)
+    return torch.cat(out)
+
+
+@torch.no_grad()
+def cell_loss_variance_batched(
+    cell_cor_range,
+    graph,
+    inr,
+    device,
+    max_samples_per_cell=16,
+    use_sqrt=False,
+    max_points_per_forward=1_000_000,
+) -> torch.Tensor:
+    """Batched 2D per-cell pilot variance of the per-point loss.
+
+    Args:
+        cell_cor_range: Tensor [N, 4] with (r_start, r_end, c_start, c_end), inclusive.
+        graph: Graph carrying `space_emb` and `feat` for a square H x H image.
+        inr: INR model.
+        device: Computation device.
+        max_samples_per_cell: pilot points drawn per cell (capped by cell size).
+        use_sqrt: if True, take the variance of sqrt(loss) = |pred - target|
+            instead of the variance of the squared loss.
+        max_points_per_forward: forward-pass chunk size, to bound peak memory.
+
+    Returns:
+        Tensor [N] of per-cell population variances.
+    """
+    graph = graph.cpu()
+    H = graph.cor.max().item() + 1
+    features = graph.feat.view(H, H, 1)
+    coords = graph.space_emb.view(H, H, 2)
+    inr.to(device)
+
+    cells = cell_cor_range.detach().cpu().long()
+    r_start, r_end = cells[:, 0], cells[:, 1]
+    c_start, c_end = cells[:, 2], cells[:, 3]
+    h = (r_end - r_start + 1).clamp_min(1)
+    w = (c_end - c_start + 1).clamp_min(1)
+
+    n_cells = cells.size(0)
+    k = int(max_samples_per_cell)
+    # Matches the loop version's n_samples = min(max_samples_per_cell, h * w).
+    n_valid = torch.minimum(torch.full_like(h, k), h * w)
+
+    rand = torch.rand(n_cells, k, 2)
+    rr = r_start.unsqueeze(1) + (rand[..., 0] * h.unsqueeze(1).to(torch.float32)).floor().long()
+    cc = c_start.unsqueeze(1) + (rand[..., 1] * w.unsqueeze(1).to(torch.float32)).floor().long()
+    mask = torch.arange(k).unsqueeze(0) < n_valid.unsqueeze(1)
+
+    flat_r, flat_c = rr.reshape(-1), cc.reshape(-1)
+    per_point = _chunked_point_losses(
+        coords[flat_r, flat_c], features[flat_r, flat_c], inr, device, max_points_per_forward
+    ).view(n_cells, k)
+
+    if use_sqrt:
+        per_point = per_point.sqrt()
+    return _masked_population_variance(per_point, mask.to(device))
+
+
+@torch.no_grad()
+def cell_loss_variance_batched_3d(
+    cell_cor_range,
+    grid_shape,
+    graph,
+    inr,
+    device,
+    max_samples_per_cell=16,
+    use_sqrt=False,
+    index_grid=None,
+    max_points_per_forward=1_000_000,
+) -> torch.Tensor:
+    """Batched 3D per-cell pilot variance of the per-point loss.
+
+    Volumes may be non-dense (an ocean/land mask leaves gaps), so candidate
+    voxels are resolved through `index_grid`; entries that land on a hole are
+    masked out, exactly as the loop version drops them.
+
+    Args:
+        cell_cor_range: Tensor [N, 6] with (x_start, x_end, y_start, y_end, z_start, z_end).
+        grid_shape: (Dx, Dy, Dz) extents of the full coordinate grid.
+        index_grid: optional prebuilt index grid; pass a cached one to avoid
+            rebuilding it on every call (it is expensive for large volumes).
+
+    Returns:
+        Tensor [N] of per-cell population variances; 0 for cells with no valid voxel.
+    """
+    graph = graph.cpu()
+    if index_grid is None:
+        index_grid = build_3d_index_grid(graph, grid_shape)
+    index_grid = index_grid.cpu()
+    inr.to(device)
+
+    cells = cell_cor_range.detach().cpu().long()
+    x_start, x_end = cells[:, 0], cells[:, 1]
+    y_start, y_end = cells[:, 2], cells[:, 3]
+    z_start, z_end = cells[:, 4], cells[:, 5]
+    w = (x_end - x_start + 1).clamp_min(1)
+    h = (y_end - y_start + 1).clamp_min(1)
+    d = (z_end - z_start + 1).clamp_min(1)
+
+    n_cells = cells.size(0)
+    k = int(max_samples_per_cell)
+    n_valid = torch.minimum(torch.full_like(w, k), w * h * d)
+
+    rand = torch.rand(n_cells, k, 3)
+    xx = x_start.unsqueeze(1) + (rand[..., 0] * w.unsqueeze(1).to(torch.float32)).floor().long()
+    yy = y_start.unsqueeze(1) + (rand[..., 1] * h.unsqueeze(1).to(torch.float32)).floor().long()
+    zz = z_start.unsqueeze(1) + (rand[..., 2] * d.unsqueeze(1).to(torch.float32)).floor().long()
+
+    node_idx = index_grid[xx.reshape(-1), yy.reshape(-1), zz.reshape(-1)].view(n_cells, k)
+    mask = (torch.arange(k).unsqueeze(0) < n_valid.unsqueeze(1)) & (node_idx >= 0)
+
+    flat_idx = node_idx.clamp_min(0).reshape(-1)  # masked entries read index 0 and are discarded
+    per_point = _chunked_point_losses(
+        graph.space_emb[flat_idx], graph.feat[flat_idx], inr, device, max_points_per_forward
+    ).view(n_cells, k)
+
+    if use_sqrt:
+        per_point = per_point.sqrt()
+    return _masked_population_variance(per_point, mask.to(device))
+
+
 def cell_loss_variance_estimate_with_random_sampling(cell_cor_range, graph, inr, device, max_samples_per_cell=16, approx_last_layer=False) -> torch.Tensor:
     """
     Estimate per-cell loss variance by random sampling points inside each cell.
@@ -451,35 +612,10 @@ def cell_loss_variance_estimate_with_random_sampling(cell_cor_range, graph, inr,
     """
     del approx_last_layer  # Intentionally unused; kept for signature compatibility.
 
-    graph = graph.cpu()
-    H = graph.cor.max().item() + 1
-    features = graph.feat.view(H, H, 1)
-    coords = graph.space_emb.view(H, H, 2)
-
-    inr.to(device)
-
-    loss_var_list = []
-
-    for cell in cell_cor_range:
-        r_start, r_end, c_start, c_end = [int(v) for v in cell.tolist()]
-
-        h = r_end - r_start + 1
-        w = c_end - c_start + 1
-        n_samples = min(max_samples_per_cell, h * w)
-
-        rr = torch.randint(r_start, r_end + 1, (n_samples,))
-        cc = torch.randint(c_start, c_end + 1, (n_samples,))
-
-        sample_coords = coords[rr, cc].to(device)
-        sample_targets = features[rr, cc].to(device)
-
-        sample_recon = inr(sample_coords)
-        sample_losses = loss_function(sample_recon, sample_targets).reshape(-1)
-
-        # Use population variance to avoid NaN when n_samples==1.
-        loss_var_list.append(sample_losses.var(unbiased=False))
-
-    return torch.stack(loss_var_list, dim=0)
+    return cell_loss_variance_batched(
+        cell_cor_range, graph, inr, device,
+        max_samples_per_cell=max_samples_per_cell, use_sqrt=False,
+    )
 
 
 def cell_sqrt_loss_variance_estimate_with_random_sampling(cell_cor_range, graph, inr, device, max_samples_per_cell=16, approx_last_layer=False) -> torch.Tensor:
@@ -507,37 +643,87 @@ def cell_sqrt_loss_variance_estimate_with_random_sampling(cell_cor_range, graph,
     """
     del approx_last_layer  # Intentionally unused; kept for signature compatibility.
 
-    graph = graph.cpu()
-    H = graph.cor.max().item() + 1
-    features = graph.feat.view(H, H, 1)
-    coords = graph.space_emb.view(H, H, 2)
+    return cell_loss_variance_batched(
+        cell_cor_range, graph, inr, device,
+        max_samples_per_cell=max_samples_per_cell, use_sqrt=True,
+    )
 
-    inr.to(device)
 
-    sqrt_loss_var_list = []
+# ============================================================================
+# Section 3b: Volumetric (3D) Cell-Utility Estimators
+# ============================================================================
+# Unlike the 2D NS/Burgers/PoolBoiling grids, volumetric datasets (e.g. SOMA ocean
+# data) are not fully dense: an ocean/land mask leaves gaps inside the coordinate
+# bounding box, so graph.feat/graph.space_emb cannot be reshaped directly to
+# (Dx, Dy, Dz, ...) via .view() like the 2D estimators above. Instead we scatter
+# node indices into a dense (Dx, Dy, Dz) lookup grid (-1 = masked-out voxel) and
+# skip masked-out candidates when sampling inside a cell.
 
-    for cell in cell_cor_range:
-        r_start, r_end, c_start, c_end = [int(v) for v in cell.tolist()]
+def build_3d_index_grid(graph, grid_shape):
+    Dx, Dy, Dz = grid_shape
+    index_grid = torch.full((Dx, Dy, Dz), -1, dtype=torch.long)
+    cor = graph.cor.long()
+    index_grid[cor[:, 0], cor[:, 1], cor[:, 2]] = torch.arange(cor.size(0))
+    return index_grid
 
-        h = r_end - r_start + 1
-        w = c_end - c_start + 1
-        n_samples = min(max_samples_per_cell, h * w)
 
-        rr = torch.randint(r_start, r_end + 1, (n_samples,))
-        cc = torch.randint(c_start, c_end + 1, (n_samples,))
+def cell_loss_variance_estimate_with_random_sampling_3d(
+    cell_cor_range, grid_shape, graph, inr, device, max_samples_per_cell=16, approx_last_layer=False,
+    index_grid=None,
+) -> torch.Tensor:
+    """
+    3D analog of cell_loss_variance_estimate_with_random_sampling.
 
-        sample_coords = coords[rr, cc].to(device)
-        sample_targets = features[rr, cc].to(device)
+    Args:
+        cell_cor_range: Tensor [N, 6] with (x_start, x_end, y_start, y_end, z_start, z_end)
+        grid_shape: (Dx, Dy, Dz) extents of the full coordinate grid
+        graph: Graph object containing spatial embeddings and features
+        inr: INR model
+        device: Computation device
+        max_samples_per_cell: Maximum number of random samples per cell
+        approx_last_layer: Kept for API compatibility; not used here.
+        index_grid: optional cached index grid, to skip rebuilding it per call.
 
-        with torch.no_grad():
-            sample_recon = inr(sample_coords)
-        sample_losses = loss_function(sample_recon, sample_targets).reshape(-1)
-        sqrt_losses = sample_losses.sqrt()
+    Returns:
+        Tensor [N] containing empirical loss variances per cell.
+    """
+    del approx_last_layer  # Intentionally unused; kept for signature compatibility.
 
-        # Use population variance to avoid NaN when n_samples==1.
-        sqrt_loss_var_list.append(sqrt_losses.var(unbiased=False))
+    return cell_loss_variance_batched_3d(
+        cell_cor_range, grid_shape, graph, inr, device,
+        max_samples_per_cell=max_samples_per_cell, use_sqrt=False, index_grid=index_grid,
+    )
 
-    return torch.stack(sqrt_loss_var_list, dim=0)
+
+def cell_sqrt_loss_variance_estimate_with_random_sampling_3d(
+    cell_cor_range, grid_shape, graph, inr, device, max_samples_per_cell=16, approx_last_layer=False,
+    index_grid=None,
+) -> torch.Tensor:
+    """
+    3D analog of cell_sqrt_loss_variance_estimate_with_random_sampling.
+
+    Identical to cell_loss_variance_estimate_with_random_sampling_3d except the
+    per-point quantity whose variance is computed is sqrt(loss) rather than loss.
+
+    Args:
+        cell_cor_range: Tensor [N, 6] with (x_start, x_end, y_start, y_end, z_start, z_end)
+        grid_shape: (Dx, Dy, Dz) extents of the full coordinate grid
+        graph: Graph object containing spatial embeddings and features
+        inr: INR model
+        device: Computation device
+        max_samples_per_cell: Maximum number of random samples per cell
+        approx_last_layer: Kept for API compatibility; not used here.
+        index_grid: optional cached index grid, to skip rebuilding it per call.
+
+    Returns:
+        Tensor [N] containing empirical variance of sqrt(loss) per cell.
+    """
+    del approx_last_layer  # Intentionally unused; kept for signature compatibility.
+
+    return cell_loss_variance_batched_3d(
+        cell_cor_range, grid_shape, graph, inr, device,
+        max_samples_per_cell=max_samples_per_cell, use_sqrt=True, index_grid=index_grid,
+    )
 
 
 def cell_grad_variance_estimate_with_random_sampling(
@@ -635,67 +821,67 @@ def cell_grad_variance_estimate_with_norm_corrected(cell_cor_range:torch.Tensor,
     Returns:
         List of gradient standard deviation estimates for each sample
     """
-    
-    
-    
+
+
+
     graph = graph.to(device)
     features = graph.feat.view(1024, 1024, 1)
     emb = graph.space_emb.view(1024, 1024, 2).requires_grad_(True)
     params = list(inr.parameters())
-    
+
     # Convert inputs to tensors if needed
     # if isinstance(rc_list, list):
     #     rc_tensor = torch.tensor(rc_list, device=device)
     # else:
     #     rc_tensor = rc_list.to(device)
-    
+
     # if isinstance(width_list, list):
     #     width_tensor = torch.tensor(width_list, device=device)
     # else:
     #     width_tensor = width_list.to(device)
-    
+
     batch_size = cell_cor_range.size(0)
-    
-    # width_list = 
+
+    # width_list =
     # rc_list
-    
-    
-    
+
+
+
     # Calculate coordinate step size
     coords_range = emb.max() - emb.min()
     H = graph.cor.max().item()
     coords_step = coords_range / H
-    
+
     # Prepare batch data
     y_x_batch = []
     input_x_batch = []
     target_batch = []
-    
+
     for i in range(batch_size):
         r = (cell_cor_range[i][0] + cell_cor_range[i][1]) // 2
         c = (cell_cor_range[i][2] + cell_cor_range[i][3]) // 2
-        
-        
+
+
         # r, c = rc_tensor[i]
         # r, c = int(r), int(c)
-        
+
         # Compute spatial gradient (y_x) using finite differences
         y_x = torch.tensor([
             (features[r+1, c] - features[r-1, c]) / coords_step / 2,
             (features[r, c+1] - features[r, c-1]) / coords_step / 2
         ], device=device)
         y_x_batch.append(y_x)
-        
+
         # Input coordinates
         input_x = emb[r, c].clone().detach().requires_grad_(True)
         input_x_batch.append(input_x)
-        
+
         # Target value
         target_batch.append(features[r, c])
-    
+
     y_x_batch = torch.stack(y_x_batch)  # [B, 2]
     target_batch = torch.stack(target_batch)  # [B, 1]
-    
+
     # Forward pass and compute losses (individual calls required for autograd)
     grad_var_list = []
     for i in range(batch_size):
@@ -706,12 +892,12 @@ def cell_grad_variance_estimate_with_norm_corrected(cell_cor_range:torch.Tensor,
         input_x = input_x_batch[i]
         out = inr(input_x)
         loss = loss_function(out, target_batch[i])
-        
+
         # Estimate Frobenius norm for this sample
         fro_norm = estimate_frobenius_norm_corrected(
             loss, out, params, input_x, y_x_batch[i], probes
         )
-        
+
         # Compute variance scaling
         # n = width_tensor[i]
         width = coords_step.double() * cor_width
@@ -786,13 +972,13 @@ def loss_variance_ground_truth(cell_cor_ranges, graph, inr, device) -> torch.Ten
         H = graph.cor.max().item() + 1
         features = graph.feat.view(H, H, 1)
         coords = graph.space_emb.detach().view(H, H, 2)
-        
+
         features = features[r_lower:r_upper + 1, c_lower:c_upper + 1]
         coords = coords[r_lower:r_upper + 1, c_lower:c_upper + 1]
-        
+
         reconfeatures = inr(coords)
         per_pixel_loss = loss_function(reconfeatures, features)
-        
+
         lvar = per_pixel_loss.var().item()
         loss_var_list.append(lvar)
     loss_var = torch.tensor(loss_var_list).to(device)
@@ -838,40 +1024,40 @@ def grad_estimation(xy_list, width_list, graph, inr, device, probes=500):
     features = graph.feat.view(1024, 1024, 1)
     coords = graph.space_emb.view(1024, 1024, 2).requires_grad_(True)
     params = list(inr.parameters())
-    
+
     # Calculate coordinate step size
     coords_range = coords.max() - coords.min()
     H = coords.size(0)
     coords_step = coords_range / (H - 1)
     grad_std_list = []
-    
+
     # Process each point individually
     for (c, r), n in zip(xy_list, width_list):
         # Compute spatial gradient using finite differences
         y_x = torch.tensor(
-            [(features[r+1, c] - features[r-1, c]) / coords_step / 2, 
+            [(features[r+1, c] - features[r-1, c]) / coords_step / 2,
              (features[r, c+1] - features[r, c-1]) / coords_step / 2]
         ).to(device)
 
         # Prepare input and compute loss
-        input_x = coords[r, c].clone().detach().to(device).requires_grad_() 
+        input_x = coords[r, c].clone().detach().to(device).requires_grad_()
         out = inr(input_x)
         loss = loss_function(out, features[r, c])
-        
+
         # Estimate Frobenius norm
         fro_norm = estimate_frobenius_norm_corrected(
             loss, out, params, input_x, y_x, probes
         )
-        
+
         # Compute variance scaling
         width = coords_step * n
         # Note: n = 2*h + 1, so box is (n+1)×(n+1) with center at (n/2, n/2)
         sigma0 = torch.sqrt(width**2 / 12 * (n + 2) / n)
-        
+
         # Store variance * area
         grad_std = sigma0 * fro_norm
         grad_std_list.append(grad_std.item()**2 * n**2)
-    
+
     return grad_std_list
 
 
@@ -894,7 +1080,7 @@ def cell_width_sigma(cor_width_tensor, coords_step):
     sigma_square = width**2 / 12 * (cor_width_tensor + 1) / (cor_width_tensor - 1)
     sigma = torch.sqrt(sigma_square)
     return sigma
-    
+
 
 def grad_estimation_fully_batched(rc_tensor, cor_width_tensor, graph, inr, device, probes=500):
     """
@@ -917,39 +1103,39 @@ def grad_estimation_fully_batched(rc_tensor, cor_width_tensor, graph, inr, devic
     graph = graph.to(device)
     rc_tensor = rc_tensor.to(device)
     cor_width_tensor = cor_width_tensor.to(device)
-    
+
     features = graph.feat.view(1024, 1024, 1)
     coords = graph.space_emb.view(1024, 1024, 2)
-    
+
     batch_size = rc_tensor.size(0)
     coords_range = coords.max() - coords.min()
     H = coords.size(0)
     coords_step = coords_range / H
-    
+
     # Extract row/column indices
     r_indices = rc_tensor[:, 0].long()
     c_indices = rc_tensor[:, 1].long()
-    
+
     # Compute spatial gradients (y_x) for all samples using vectorized operations
     y_x_r = (features[r_indices + 1, c_indices] - features[r_indices - 1, c_indices]) / coords_step / 2
     y_x_c = (features[r_indices, c_indices + 1] - features[r_indices, c_indices - 1]) / coords_step / 2
     y_x_batch = torch.stack([y_x_r.squeeze(), y_x_c.squeeze()], dim=1)  # [B, 2]
-    
+
     # Get input coordinates and targets
     input_coords_batch = coords[r_indices, c_indices]  # [B, 2]
     target_batch = features[r_indices, c_indices]  # [B, 1]
-    
+
     # Compute Frobenius norms (still requires individual autograd calls)
     grad_std_list = []
     for i in range(batch_size):
         input_x = input_coords_batch[i].clone().detach().requires_grad_(True)
         out = inr(input_x)
         loss = loss_function(out, target_batch[i])
-        
+
         fro_norm = estimate_frobenius_norm_corrected(
             loss, out, list(inr.parameters()), input_x, y_x_batch[i], probes
         )
-        
+
         # Compute variance scaling
         n = cor_width_tensor[i]
         width = coords_step * (n-1)
@@ -957,7 +1143,7 @@ def grad_estimation_fully_batched(rc_tensor, cor_width_tensor, graph, inr, devic
         sigma0 = torch.sqrt(width**2 / 12 * (n + 1) / (n - 1))
         grad_std = sigma0 * fro_norm
         grad_std_list.append(grad_std.item())
-    
+
     return grad_std_list
 
 
@@ -986,21 +1172,21 @@ def grad_win_batched(rc_tensor, width_tensor, graph, inr, device):
     graph = graph.to(device)
     rc_tensor = rc_tensor.to(device)
     width_tensor = width_tensor.to(device)
-    
+
     features = graph.feat.view(1024, 1024, 1)
     coords = graph.space_emb.view(1024, 1024, 2)
-    
+
     # Reconstruct all features and compute per-pixel loss
     features_recon = inr(coords)
     loss_per_pixel = loss_function(features_recon, features)
     params = list(inr.parameters())
-    
+
     batch_size = rc_tensor.size(0)
-    
+
     # Extract center coordinates
     r_indices = rc_tensor[:, 0].long()
     c_indices = rc_tensor[:, 1].long()
-    
+
     # Compute variance for each window
     grad_std_list = []
     for i in range(batch_size):
@@ -1009,7 +1195,7 @@ def grad_win_batched(rc_tensor, width_tensor, graph, inr, device):
         width = width_tensor[i]
         grad_std = grad_variance_ground_truth(r, c, loss_per_pixel, params, width)
         grad_std_list.append(grad_std)
-    
+
     return grad_std_list
 
 

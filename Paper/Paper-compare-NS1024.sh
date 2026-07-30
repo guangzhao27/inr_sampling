@@ -1,21 +1,20 @@
 #!/bin/bash
-#SBATCH --qos=regular
-#SBATCH --time=4:00:00
-#SBATCH --nodes=1
-#SBATCH --ntasks-per-node=1
-#SBATCH --constraint=gpu
-#SBATCH --gpus-per-node=1
-#SBATCH --account=m2956_g
+#SBATCH -p csi
+#SBATCH -t 06:00:00
+#SBATCH --account csiml
+#SBATCH -N 1
+#SBATCH --qos csi
+#SBATCH --gres=gpu:1
+project_name="NIPS-inr-sampling"
 
 w0=30
 sampling_rate=2e-3
 train_ratio=1
 inner_steps=6
-depth=2
+depth=3
 n_start=11
 n_finish=128
 re=10000
-time_frame=100
 optimizer_name=sgd
 sgd_momentum=0.9
 sgd_nesterov=True
@@ -24,7 +23,6 @@ sgd_dampening=0.0
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-cd /pscratch/sd/g/gzhao27/INR/INR_SAMPLE
 
 HOST=$(hostname -f)
 is_bnl=false
@@ -35,9 +33,11 @@ if [[ $HOST == *"bnl"* ]]; then
   wandb offline
   wandb_base_dir="${WANDB_DIR:-${REPO_ROOT}/coral/wandb}"
   wandb_run_dir="$wandb_base_dir/wandb"
-  offline_log_file="$wandb_base_dir/offline_run_paths.txt"
+  offline_log_file="/sdcc/u/gzhao/scratch/inr_sampling/coral/wandb/offline_run_paths.txt"
+  command_log_file="/sdcc/u/gzhao/scratch/inr_sampling/offline_command_paths.sh"
   mkdir -p "$wandb_run_dir"
   touch "$offline_log_file"
+  touch "$command_log_file"
   data_path="/sdcc/u/gzhao/scratch/inr_sampling/data/NS2d/ns_data_res2048_re${re}_7.npy"
 else
   source ~/anaconda3/etc/profile.d/conda.sh
@@ -47,13 +47,11 @@ fi
 
 # LR sweep values for SGD
 # methods: full random NMT grid_linear EVOS adaptive_topk_none adaptive_loss_sqrt_std adaptive_unbiased
-for lr in 2e-4 1e-4 8e-5 5e-5; do
+for time_frame in 100 120 140 160 180 200; do
+for seed in 42; do
+for lr in 1e-5; do
   for case_name in \
-    random \
-    full \
-    adaptive_unbiased \
-    adaptive_best \
-    adaptive_best_fast ; do
+      adaptive_best_fast ; do
 
     # --- default values for all adaptive/sampling params ---
     sample_type="null"
@@ -103,33 +101,43 @@ for lr in 2e-4 1e-4 8e-5 5e-5; do
     elif [[ "$case_name" == "adaptive_unbiased" ]]; then
       sample_type="2d_grid_adaptive"
       adaptive_mode="loss_sqrt_std"
-      adaptive_iterations=8
+      adaptive_iterations=5
       adaptive_equal_cell_topk="True"
       adaptive_equal_cell_topk_count_mode="same"
-      adaptive_equal_cell_topk_weight_mode="area_over_count"
-      adaptive_weight_mode="area_over_count"
+      adaptive_equal_cell_topk_weight_mode="unbiased_weight"
+      adaptive_weight_mode="unbiased_weight"
       power_for_loss_as_weight=1.0
     
     elif [[ "$case_name" == "adaptive_best" ]]; then
       sample_type="2d_grid_adaptive"
       adaptive_mode="loss_sqrt_std"
-      adaptive_iterations=8
+      adaptive_iterations=5
       adaptive_equal_cell_topk="True"
       adaptive_equal_cell_topk_count_mode="same"
-      adaptive_equal_cell_topk_weight_mode="loss_sqrt"
+      adaptive_equal_cell_topk_weight_mode="loss_powered_weight"
       adaptive_weight_mode="none"
       power_for_loss_as_weight=0.25
-    
-    elif [[ "$case_name" == "adaptive_best_fast" ]]; then
+
+    elif [[ "$case_name" == "adaptive_large_bias" ]]; then
       sample_type="2d_grid_adaptive"
       adaptive_mode="loss_sqrt_std"
       adaptive_iterations=5
       adaptive_equal_cell_topk="True"
       adaptive_equal_cell_topk_count_mode="same"
-      adaptive_equal_cell_topk_weight_mode="loss_sqrt"
+      adaptive_equal_cell_topk_weight_mode="loss_powered_weight"
+      adaptive_weight_mode="none"
+      power_for_loss_as_weight=1.0
+    
+    elif [[ "$case_name" == "adaptive_best_fast" ]]; then
+      sample_type="2d_grid_adaptive"
+      adaptive_mode="loss_sqrt_std"
+      adaptive_iterations=4
+      adaptive_equal_cell_topk="True"
+      adaptive_equal_cell_topk_count_mode="same"
+      adaptive_equal_cell_topk_weight_mode="loss_powered_weight"
       adaptive_weight_mode="none"
       power_for_loss_as_weight=0.25
-      adaptive_grid_update_interval=200
+      adaptive_grid_update_interval=500
 
     else
       echo "Unknown case: $case_name"
@@ -147,6 +155,7 @@ for lr in 2e-4 1e-4 8e-5 5e-5; do
         inr.model_type=siren \
         data.space_factor=1 \
         optim.batch_size=2 \
+        data.seed=$seed \
         optim.optimizer=$optimizer_name \
         optim.sgd_momentum=$sgd_momentum \
         optim.sgd_nesterov=$sgd_nesterov \
@@ -160,12 +169,9 @@ for lr in 2e-4 1e-4 8e-5 5e-5; do
         inr.depth=$depth \
         inr.hidden_dim=155 \
         inr.w0=$w0 \
-        saved_checkpoint=False \
-        save_checkpoints=False \
-        save_sampled_frames=False \
         wandb.name=$run_name \
         wandb.use_wandb=True \
-        wandb.project=workshop-inr-sampling-sgd-lr-tune \
+        wandb.project=$project_name \
         sampling.rate=$sampling_rate \
         sampling.type=$sample_type \
         sampling.adaptive_mode=$adaptive_mode \
@@ -196,6 +202,7 @@ for lr in 2e-4 1e-4 8e-5 5e-5; do
         while IFS= read -r run_dir_name; do
           [[ -z "$run_dir_name" ]] && continue
           printf "%s\t%s\t%s\n" "$(date '+%Y-%m-%d %H:%M:%S')" "$run_name" "$wandb_run_dir/$run_dir_name" >> "$offline_log_file"
+          echo "echo '[SYNC]' $run_name; wandb sync $wandb_run_dir/$run_dir_name || echo '[FAILED]' $run_name" >> "$command_log_file"
         done <<< "$new_runs"
       else
         printf "%s\t%s\t%s\n" "$(date '+%Y-%m-%d %H:%M:%S')" "$run_name" "OFFLINE_DIR_NOT_FOUND" >> "$offline_log_file"
@@ -203,4 +210,6 @@ for lr in 2e-4 1e-4 8e-5 5e-5; do
     fi
 
   done
+done
+done
 done

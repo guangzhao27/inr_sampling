@@ -163,6 +163,18 @@ sampling:
   adaptive_count_floor_mode: "min_one"  # "min_one" or "soft"
   adaptive_count_floor_frac: 0.1        # only used when mode="soft": floor as a fraction of n/H
   adaptive_initial_grid_size: 8       # 3d_grid_adaptive: octree initial grid = size^3 leaf cells (lower it for very low sampling rates so initial cells stay << n_samples)
+  # --- Anisotropic (axis-wise) octree split (3d_grid_adaptive only) ---
+  # "isotropic" = the published octree 2^d split (default, reproduces existing results
+  # bit-for-bit). "axiswise" = binary per-axis split: each selected cell is split along the
+  # single axis whose midpoint split maximally reduces within-cell |error| variance (ANOVA
+  # gain). Only the partition step changes; allocation/weighting/loss/backbone are untouched.
+  split_mode: "isotropic"             # "isotropic" | "axiswise"
+  target_num_regions: null            # axiswise: keep splitting until leaf count K >= this (set to the isotropic run's realized K for a region-count-matched comparison). Required when split_mode=axiswise.
+  axiswise_pilot_samples: 64          # axiswise: pilot points per cell for gain/sigma (isotropic stays 16); >= min_samples
+  axiswise_min_samples_per_cell: 32   # axiswise: skip a cell if it has fewer valid pilot points (half-region means too noisy)
+  axiswise_min_cell_edge: 2           # axiswise: skip a split if the cell edge along j* is below this (voxels)
+  axiswise_rho_min: 0.05              # axiswise: floor on rho_k = surviving within-variance fraction
+  axiswise_max_pass_cap: 50           # axiswise: hard cap on refinement passes
   runtime_profile: True            # collect per-iteration runtime breakdown (forward/backward/sampling/partition-update)
   use_weight_function: True          # only used by sampling.type=2d_grid_linear_weighted
   fixed_cell_size: 32               # only used by sampling.type=2d_grid_fixed: cell edge length in pixels

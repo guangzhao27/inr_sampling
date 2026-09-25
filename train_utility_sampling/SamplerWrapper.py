@@ -1505,6 +1505,13 @@ class INRSingle3dAdaptiveSamplerWrapper(InrSamplerWrapper):
         count_floor_mode: str = "min_one",
         count_floor_frac: float = 0.1,
         initial_grid_size: int = 8,
+        split_mode: str = "isotropic",
+        target_num_regions: Optional[int] = None,
+        axiswise_pilot_samples: int = 64,
+        axiswise_min_samples_per_cell: int = 32,
+        axiswise_min_cell_edge: int = 2,
+        axiswise_rho_min: float = 0.05,
+        axiswise_max_pass_cap: int = 50,
         save_samples_path: Path = Path("logs/sampling"),
         save_interval: int = 100,
         grid_shape=(1, 1, 1),
@@ -1560,8 +1567,26 @@ class INRSingle3dAdaptiveSamplerWrapper(InrSamplerWrapper):
             )
         self.count_floor_mode = count_floor_mode
         self.count_floor_frac = float(count_floor_frac)
-        self.initial_grid_size = max(1, int(initial_grid_size))
+        if isinstance(initial_grid_size, (list, tuple)):
+            self.initial_grid_size = tuple(max(1, int(v)) for v in initial_grid_size)
+        else:
+            self.initial_grid_size = max(1, int(initial_grid_size))
         self.grid_shape = tuple(int(v) for v in grid_shape)
+
+        if split_mode not in ("isotropic", "axiswise"):
+            raise ValueError(f"Unknown split_mode '{split_mode}'. Expected 'isotropic' or 'axiswise'.")
+        self.split_mode = split_mode
+        self.target_num_regions = None if target_num_regions is None else int(target_num_regions)
+        self.axiswise_pilot_samples = max(4, int(axiswise_pilot_samples))
+        self.axiswise_min_samples_per_cell = max(1, int(axiswise_min_samples_per_cell))
+        self.axiswise_min_cell_edge = max(2, int(axiswise_min_cell_edge))
+        self.axiswise_rho_min = float(axiswise_rho_min)
+        self.axiswise_max_pass_cap = max(1, int(axiswise_max_pass_cap))
+        if split_mode == "axiswise" and self.target_num_regions is None:
+            raise ValueError(
+                "split_mode='axiswise' requires sampling.target_num_regions (the "
+                "region-count-matched target K_iso from the isotropic run)."
+            )
 
         self.last_grid_update_step: Optional[int] = None
         self.cached_bounds: Optional[torch.Tensor] = None
@@ -1582,15 +1607,34 @@ class INRSingle3dAdaptiveSamplerWrapper(InrSamplerWrapper):
             return True
         return (inner_step - self.last_grid_update_step) >= self.grid_update_interval
 
-    def _refresh_cached_leaf_properties(self, eval_fn) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Rebuild adaptive octree and cache leaf bounds/volumes/values."""
+    def _refresh_cached_leaf_properties(self, eval_fn, graph) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Rebuild adaptive octree and cache leaf bounds/volumes/values.
+
+        The partition is built with the isotropic octree split (default) or the
+        anisotropic per-axis split (`split_mode='axiswise'`). Either way the final
+        per-leaf allocation `values` are computed with the SAME scalar
+        loss_sqrt_std evaluator (`eval_fn`), so downstream Neyman/Poisson
+        allocation and weighting are untouched — only the partition changes.
+        """
         grid = HierarchicalVoxelGrid(self.grid_shape, initial_grid_size=self.initial_grid_size)
-        grid.iterative_subdivision(
-            eval_fn,
-            iterations=self.adaptive_iterations,
-            percentage=self.subdivision_percentage,
-            batch_mode=True,
-        )
+        if self.split_mode == "axiswise":
+            axis_eval = self._create_axiswise_evaluation_function(graph)
+            grid.iterative_subdivision(
+                axis_eval,
+                split_mode="axiswise",
+                percentage=self.subdivision_percentage,
+                target_num_regions=self.target_num_regions,
+                max_pass_cap=self.axiswise_max_pass_cap,
+                min_cell_edge=self.axiswise_min_cell_edge,
+                batch_mode=True,
+            )
+        else:
+            grid.iterative_subdivision(
+                eval_fn,
+                iterations=self.adaptive_iterations,
+                percentage=self.subdivision_percentage,
+                batch_mode=True,
+            )
 
         bounds, cell_sizes, values = grid.get_leaf_properties_tensor(
             evaluation_function=eval_fn,
@@ -1600,6 +1644,26 @@ class INRSingle3dAdaptiveSamplerWrapper(InrSamplerWrapper):
         self.cached_cell_sizes = cell_sizes
         self.cached_values = values
         self.cached_grid = grid
+        self._last_axiswise_diagnostics = getattr(grid, "axiswise_diagnostics", None)
+
+        if self.split_mode == "axiswise" and self._last_axiswise_diagnostics:
+            diag = self._last_axiswise_diagnostics
+            realized_K = bounds.shape[0]
+            axis_hist = [0, 0, 0]
+            for d in diag:
+                for a in range(3):
+                    axis_hist[a] += d["axis_hist"][a]
+            edges = (bounds[:, [1, 3, 5]] - bounds[:, [0, 2, 4]] + 1).to(torch.float32)
+            aspect = (edges.max(dim=1).values / edges.min(dim=1).values.clamp_min(1)).mean().item()
+            rhos = [d["rho_split_mean"] for d in diag if d["rho_split_mean"] is not None]
+            rho_mean = sum(rhos) / len(rhos) if rhos else float("nan")
+            print(
+                f"[axiswise] realized_K={realized_K} (target={self.target_num_regions}) "
+                f"passes={len(diag)} j*_hist[x,y,z]={axis_hist} "
+                f"mean_aspect={aspect:.3f} mean_rho_split={rho_mean:.4f}",
+                flush=True,
+            )
+
         return bounds, cell_sizes, values
 
     def _create_evaluation_function(self, graph: Data, mode: str = 'loss'):
@@ -1633,6 +1697,92 @@ class INRSingle3dAdaptiveSamplerWrapper(InrSamplerWrapper):
 
         return evaluate_cells
 
+    def _create_axiswise_evaluation_function(self, graph: Data):
+        """Anisotropic per-axis split scorer for the octree.
+
+        Contract: eval_fn(cells) -> (scores, best_axis, valid, rho), each a
+        length-len(cells) python list.
+
+        For every leaf it reuses the pilot draw of
+        `cell_loss_variance_batched_3d(return_points=True)` (|error| residuals),
+        so no extra sampling pass is added. Per axis j it partitions those pilot
+        points by the cell midpoint (same floor-division as `subdivide_axis`) and
+        forms the ANOVA between-group term
+
+            gain_j = p_A p_B (rbar_A - rbar_B)^2
+
+        which is exactly the within-cell variance a midpoint split along j
+        removes. Then
+
+            j*      = argmax_j gain_j   (over axes with both halves populated)
+            sigma_r = sqrt(Var|error|)
+            s_k     = Volume_k * gain_{j*} / (sigma_r + eps)     # == (1-rho) N_k sigma_r
+            rho_k   = clamp(1 - gain_{j*}/(Var|error| + eps), rho_min, 1)
+
+        Guards (task): skip cells with fewer than `min_samples_per_cell` valid
+        pilot points, or with a degenerate midpoint split on every axis, or with
+        Var|error| < eps (score set to 0 / marked invalid).
+        """
+        index_grid = self._get_index_grid(graph)
+        eps = 1e-12
+        min_samples = self.axiswise_min_samples_per_cell
+        rho_min = self.axiswise_rho_min
+
+        def evaluate_axiswise(cells: list):
+            bnds = torch.tensor(
+                [[c.x_start, c.x_end, c.y_start, c.y_end, c.z_start, c.z_end] for c in cells],
+                device=self.device, dtype=torch.long,
+            )
+            var, coords, res, mask = cell_loss_variance_batched_3d(
+                bnds, self.grid_shape, graph, self.model, self.device,
+                max_samples_per_cell=self.axiswise_pilot_samples, use_sqrt=True,
+                index_grid=index_grid, return_points=True,
+            )
+            var = var.to(torch.float32)
+            coords = coords.to(torch.float32)          # [N, k, 3]
+            res = res.to(torch.float32)                # [N, k]
+            m = mask.to(torch.float32)                 # [N, k]
+            nS = m.sum(dim=1)                           # [N]
+
+            lo = bnds[:, [0, 2, 4]].to(torch.float32)   # x/y/z start
+            hi = bnds[:, [1, 3, 5]].to(torch.float32)   # x/y/z end (inclusive)
+            mids = torch.div(lo + hi, 2, rounding_mode="floor")  # [N, 3] matches subdivide_axis
+            vol = (hi - lo + 1).prod(dim=1)             # [N] voxel volume (== N_k for dense)
+
+            gains = []
+            both_ok = []
+            for j in range(3):
+                cj = coords[:, :, j]                    # [N, k]
+                in_A = (cj <= mids[:, j:j + 1]).to(torch.float32) * m
+                in_B = (cj > mids[:, j:j + 1]).to(torch.float32) * m
+                nA, nB = in_A.sum(dim=1), in_B.sum(dim=1)
+                meanA = (res * in_A).sum(dim=1) / nA.clamp_min(1)
+                meanB = (res * in_B).sum(dim=1) / nB.clamp_min(1)
+                pA, pB = nA / nS.clamp_min(1), nB / nS.clamp_min(1)
+                ok = (nA > 0) & (nB > 0)
+                gj = torch.where(ok, pA * pB * (meanA - meanB) ** 2, torch.zeros_like(nA))
+                gains.append(gj)
+                both_ok.append(ok)
+            gains = torch.stack(gains, dim=1)           # [N, 3]
+            both_ok = torch.stack(both_ok, dim=1)       # [N, 3] bool
+
+            # pick j* only among axes with a non-degenerate midpoint split
+            gains_masked = torch.where(both_ok, gains, torch.full_like(gains, -1.0))
+            best_val, best_axis = gains_masked.max(dim=1)
+            gain_star = best_val.clamp_min(0.0)         # [N]
+
+            sigma_r = var.clamp_min(0.0).sqrt()         # [N]
+            score = vol * gain_star / (sigma_r + eps)
+            score = torch.where(var > eps, score, torch.zeros_like(score))
+            rho = (1.0 - gain_star / (var + eps)).clamp(rho_min, 1.0)
+
+            splittable = both_ok.any(dim=1)
+            valid = (nS >= min_samples) & splittable & (var > eps)
+
+            return score.tolist(), best_axis.tolist(), valid.tolist(), rho.tolist()
+
+        return evaluate_axiswise
+
     def sample(
         self,
         inner_step: int,
@@ -1645,7 +1795,7 @@ class INRSingle3dAdaptiveSamplerWrapper(InrSamplerWrapper):
         eval_fn = self._create_evaluation_function(graph, mode=self.mode)
 
         if self._should_refresh_cache(inner_step):
-            bounds, cell_volume, values = self._refresh_cached_leaf_properties(eval_fn)
+            bounds, cell_volume, values = self._refresh_cached_leaf_properties(eval_fn, graph)
             self.last_grid_update_step = inner_step
         else:
             if self.cached_bounds is None or self.cached_cell_sizes is None or self.cached_values is None:
@@ -2583,6 +2733,17 @@ def _resolve_stratified_n_bins(cfg):
     return [int(v) for v in n_bins]
 
 
+def _resolve_adaptive_initial_grid_size(cfg):
+    """Read `sampling.adaptive_initial_grid_size`, allowing a scalar (same initial cell
+    COUNT on every axis -- the original behaviour) or a length-3 list `[nx, ny, nz]` of
+    per-axis counts, e.g. to make the initial 3D octree cells actual cubes on a
+    non-cubic volume instead of following its aspect ratio."""
+    n = cfg.sampling.get("adaptive_initial_grid_size", 8)
+    if isinstance(n, (int, float)):
+        return int(n)
+    return [int(v) for v in n]
+
+
 def create_inr_sampler(cfg, inr, graph, current_date_str, run_name, device='cuda'):
     """
     Build and return an INRSingle2dSamplerWrapper, INRSingle3dSamplerWrapper, or
@@ -2619,7 +2780,14 @@ def create_inr_sampler(cfg, inr, graph, current_date_str, run_name, device='cuda
                 subdivision_percentage=cfg.sampling.get("subdivision_percentage", 20.0),
                 count_floor_mode=cfg.sampling.get("adaptive_count_floor_mode", "min_one"),
                 count_floor_frac=cfg.sampling.get("adaptive_count_floor_frac", 0.1),
-                initial_grid_size=cfg.sampling.get("adaptive_initial_grid_size", 8),
+                initial_grid_size=_resolve_adaptive_initial_grid_size(cfg),
+                split_mode=cfg.sampling.get("split_mode", "isotropic"),
+                target_num_regions=cfg.sampling.get("target_num_regions", None),
+                axiswise_pilot_samples=cfg.sampling.get("axiswise_pilot_samples", 64),
+                axiswise_min_samples_per_cell=cfg.sampling.get("axiswise_min_samples_per_cell", 32),
+                axiswise_min_cell_edge=cfg.sampling.get("axiswise_min_cell_edge", 2),
+                axiswise_rho_min=cfg.sampling.get("axiswise_rho_min", 0.05),
+                axiswise_max_pass_cap=cfg.sampling.get("axiswise_max_pass_cap", 50),
                 save_samples_path=save_path,
                 grid_shape=grid_shape,
             )

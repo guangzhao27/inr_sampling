@@ -536,7 +536,8 @@ def cell_loss_variance_batched_3d(
     use_sqrt=False,
     index_grid=None,
     max_points_per_forward=1_000_000,
-) -> torch.Tensor:
+    return_points=False,
+):
     """Batched 3D per-cell pilot variance of the per-point loss.
 
     Volumes may be non-dense (an ocean/land mask leaves gaps), so candidate
@@ -548,9 +549,20 @@ def cell_loss_variance_batched_3d(
         grid_shape: (Dx, Dy, Dz) extents of the full coordinate grid.
         index_grid: optional prebuilt index grid; pass a cached one to avoid
             rebuilding it on every call (it is expensive for large volumes).
+        return_points: if True, also return the per-point pilot draw that the
+            variance is computed from — used by the axis-wise (anisotropic) octree
+            split to compute per-axis ANOVA gain from the SAME sample set, without
+            adding a second sampling pass. Default False keeps the signature and
+            single-tensor return of the original estimator (so
+            verify_batched_estimator.py and every isotropic caller are unaffected).
 
     Returns:
-        Tensor [N] of per-cell population variances; 0 for cells with no valid voxel.
+        If return_points is False (default): Tensor [N] of per-cell population
+        variances; 0 for cells with no valid voxel.
+        If return_points is True: tuple (variance [N], coords [N, k, 3] with
+        (x, y, z) per pilot point, residuals [N, k] (the per-point quantity whose
+        variance is returned — |error| when use_sqrt else squared loss), mask
+        [N, k] of valid pilot points). Masked-out entries carry arbitrary values.
     """
     graph = graph.cpu()
     if index_grid is None:
@@ -585,7 +597,12 @@ def cell_loss_variance_batched_3d(
 
     if use_sqrt:
         per_point = per_point.sqrt()
-    return _masked_population_variance(per_point, mask.to(device))
+    mask_dev = mask.to(device)
+    variance = _masked_population_variance(per_point, mask_dev)
+    if return_points:
+        coords = torch.stack([xx, yy, zz], dim=-1).to(device)  # [n_cells, k, 3]
+        return variance, coords, per_point, mask_dev
+    return variance
 
 
 def cell_loss_variance_estimate_with_random_sampling(cell_cor_range, graph, inr, device, max_samples_per_cell=16, approx_last_layer=False) -> torch.Tensor:
